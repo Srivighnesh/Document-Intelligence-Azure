@@ -1,0 +1,10 @@
+azure-ai-documentintelligence==1.0.0
+azure-ai-projects>=2.1.0
+azure-identity
+azure-storage-blob
+fastapi
+uvicorn
+python-multipart
+python-dotenv==1.1.1
+pydantic>=2.0,<3.0
+azure-keyvault-secrets
