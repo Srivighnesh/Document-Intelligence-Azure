@@ -1,250 +1,220 @@
-# Azure CLI Resource Setup
+# Create Azure Resources with Azure CLI
 
-This guide provisions the Azure resources used by this project:
+This guide creates the Azure resources used by this project and assigns the
+roles needed by the local developer account:
 
-1. A resource group.
-2. An Azure AI Document Intelligence resource for OCR.
-3. Optionally, a Microsoft Foundry account and project for agent summaries.
+- Azure AI Document Intelligence
+- Azure Blob Storage and a container
+- Azure Key Vault
+- A Microsoft Foundry account and project
 
-The commands are written for PowerShell. Replace every value in angle brackets
-before running them.
+The API uses `DefaultAzureCredential`, so these role assignments are for the
+identity you sign in with using `az login`. You need Azure CLI 2.80.0 or later
+for Foundry project commands, and permission to create resources and assign
+roles. An Owner can do both; Contributor can create resources but cannot assign
+roles.
 
-## Prerequisites
+## 1. Sign in and set names
 
-Install and sign in to Azure CLI:
+Replace the sample names and choose a region supported by the Azure services in
+your subscription. Storage account names must be globally unique and contain
+only lowercase letters and numbers. Key Vault and Foundry names must also be
+globally unique.
 
 ```powershell
+az version
 az login
 az account set --subscription "<subscription-id>"
-az extension add --name cognitiveservices
-```
+az account show --query "{subscription:name,id:id}" --output table
 
-Confirm the active subscription:
-
-```powershell
-az account show --query "{name:name,id:id,tenantId:tenantId}" -o table
-```
-
-## Set deployment variables
-
-Choose a region available for your subscription. The region is important:
-Document Intelligence and Foundry project availability can differ by region.
-
-```powershell
 $LOCATION = "eastus"
 $RESOURCE_GROUP = "rg-document-intelligence-dev"
-$DOCUMENT_RESOURCE = "docintel-dev"
-$FOUNDRY_ACCOUNT = "foundry-dev"
+$DI_NAME = "<unique-document-intelligence-name>"
+$STORAGE_NAME = "<globally-unique-storage-name>"
+$CONTAINER = "documents"
+$KEY_VAULT = "<globally-unique-key-vault-name>"
+$FOUNDRY_NAME = "<globally-unique-foundry-name>"
 $FOUNDRY_PROJECT = "document-summary"
 ```
 
-Azure resource names must be globally unique where required. Use only letters,
-numbers, and hyphens for names that require DNS-compatible naming.
+If `az version` is older than 2.80.0, run `az upgrade` before continuing.
 
-## Create the resource group
-
-```powershell
-az group create `
-  --name $RESOURCE_GROUP `
-  --location $LOCATION
-```
-
-## Create the Document Intelligence resource
-
-Create a Cognitive Services account with the Document Intelligence kind:
+## 2. Create the resources
 
 ```powershell
+az group create --name $RESOURCE_GROUP --location $LOCATION
+az provider register --namespace Microsoft.CognitiveServices
+
 az cognitiveservices account create `
-  --name $DOCUMENT_RESOURCE `
+  --name $DI_NAME `
   --resource-group $RESOURCE_GROUP `
   --location $LOCATION `
   --kind FormRecognizer `
   --sku S0 `
   --yes
-```
 
-Retrieve its endpoint and key:
-
-```powershell
-$DOCUMENT_ENDPOINT = az cognitiveservices account show `
-  --name $DOCUMENT_RESOURCE `
+az storage account create `
+  --name $STORAGE_NAME `
   --resource-group $RESOURCE_GROUP `
-  --query properties.endpoint `
-  --output tsv
+  --location $LOCATION `
+  --sku Standard_LRS `
+  --kind StorageV2 `
+  --allow-blob-public-access false
 
-$DOCUMENT_KEY = az cognitiveservices account keys list `
-  --name $DOCUMENT_RESOURCE `
+az keyvault create `
+  --name $KEY_VAULT `
   --resource-group $RESOURCE_GROUP `
-  --query key1 `
-  --output tsv
+  --location $LOCATION `
+  --enable-rbac-authorization true `
+  --enable-purge-protection true
 
-Write-Output $DOCUMENT_ENDPOINT
-```
-
-`S0` is the standard paid tier. Review pricing and quota before using it in
-production.
-
-## Optional: create a Microsoft Foundry account
-
-Use this only when the project needs Foundry agent summarization or other
-generative AI features. OCR does not require Foundry.
-
-```powershell
 az cognitiveservices account create `
-  --name $FOUNDRY_ACCOUNT `
+  --name $FOUNDRY_NAME `
   --resource-group $RESOURCE_GROUP `
   --location $LOCATION `
   --kind AIServices `
   --sku S0 `
+  --custom-domain $FOUNDRY_NAME `
+  --assign-identity `
+  --allow-project-management true `
   --yes
-```
 
-## Optional: create a Foundry project
-
-The project command and available options can vary with the installed Azure
-CLI extension. Inspect the current command first:
-
-```powershell
-az cognitiveservices account project -h
-```
-
-On subscriptions that support the project command:
-
-```powershell
 az cognitiveservices account project create `
-  --name $FOUNDRY_ACCOUNT `
+  --name $FOUNDRY_NAME `
   --resource-group $RESOURCE_GROUP `
   --project-name $FOUNDRY_PROJECT `
   --location $LOCATION
 ```
 
-Get the project resource ID:
+## 3. Assign roles to your signed-in account
 
-```powershell
-$PROJECT_ID = az cognitiveservices account project show `
-  --name $FOUNDRY_ACCOUNT `
-  --resource-group $RESOURCE_GROUP `
-  --project-name $FOUNDRY_PROJECT `
-  --query id `
-  --output tsv
-```
-
-If the project command is unavailable, create the project from the Microsoft
-Foundry portal, then continue with the endpoint and RBAC steps below.
-
-## Grant local developer access
-
-Find the signed-in user object ID:
+Run these commands as an account that can create role assignments. The role
+assignments can take a few minutes to take effect.
 
 ```powershell
 $USER_ID = az ad signed-in-user show --query id --output tsv
-```
-
-Grant access to the Document Intelligence resource:
-
-```powershell
-$DOCUMENT_ID = az cognitiveservices account show `
-  --name $DOCUMENT_RESOURCE `
-  --resource-group $RESOURCE_GROUP `
-  --query id `
-  --output tsv
-
-az role assignment create `
-  --assignee-object-id $USER_ID `
-  --assignee-principal-type User `
-  --role "Cognitive Services User" `
-  --scope $DOCUMENT_ID
-```
-
-If using a Foundry project with `DefaultAzureCredential`, grant the Foundry
-User role:
-
-```powershell
-az role assignment create `
-  --assignee-object-id $USER_ID `
-  --assignee-principal-type User `
-  --role "Foundry User" `
-  --scope $PROJECT_ID
-```
-
-Role assignments can take several minutes to become effective.
-
-## Get the Foundry project endpoint
-
-```powershell
-$FOUNDRY_ENDPOINT = az cognitiveservices account project show `
-  --name $FOUNDRY_ACCOUNT `
+$STORAGE_ID = az storage account show `
+  --name $STORAGE_NAME --resource-group $RESOURCE_GROUP --query id --output tsv
+$VAULT_ID = az keyvault show `
+  --name $KEY_VAULT --resource-group $RESOURCE_GROUP --query id --output tsv
+$PROJECT_ID = az cognitiveservices account project show `
+  --name $FOUNDRY_NAME `
   --resource-group $RESOURCE_GROUP `
   --project-name $FOUNDRY_PROJECT `
-  --query properties.endpoints `
-  --output json
+  --query id --output tsv
 
-Write-Output $FOUNDRY_ENDPOINT
+az role assignment create --assignee-object-id $USER_ID --assignee-principal-type User --role "Storage Blob Data Contributor" --scope $STORAGE_ID
+az role assignment create --assignee-object-id $USER_ID --assignee-principal-type User --role "Key Vault Secrets User" --scope $VAULT_ID
+az role assignment create --assignee-object-id $USER_ID --assignee-principal-type User --role "Key Vault Secrets Officer" --scope $VAULT_ID
+az role assignment create --assignee-object-id $USER_ID --assignee-principal-type User --role "53ca6127-db72-4b80-b1b0-d745d6d5456d" --scope $PROJECT_ID
 ```
 
-Copy the project endpoint shown by the command. Do not assume the account
-endpoint is the same as the project endpoint.
+`Key Vault Secrets User` lets the app read secrets. `Key Vault Secrets Officer`
+lets your account add the secrets in the next step. The Foundry role ID is the
+current `Foundry User` role. The project-level assignment lets the signed-in
+account invoke the configured project agent.
 
-## Configure `.env`
+Create the Blob container using Microsoft Entra authentication:
 
-Create or update the project-root `.env` file:
+```powershell
+az storage container create `
+  --name $CONTAINER `
+  --account-name $STORAGE_NAME `
+  --auth-mode login
+```
+
+## 4. Save the app settings in Key Vault
+
+The app expects these exact secret names. The Document Intelligence key is
+captured in a PowerShell variable and sent directly to Key Vault; don't print
+it or save it in `.env`.
+
+```powershell
+$DI_ENDPOINT = az cognitiveservices account show `
+  --name $DI_NAME --resource-group $RESOURCE_GROUP `
+  --query properties.endpoint --output tsv
+$DI_KEY = az cognitiveservices account keys list `
+  --name $DI_NAME --resource-group $RESOURCE_GROUP `
+  --query key1 --output tsv
+$FOUNDRY_ENDPOINT = az cognitiveservices account project show `
+  --name $FOUNDRY_NAME `
+  --resource-group $RESOURCE_GROUP `
+  --project-name $FOUNDRY_PROJECT `
+  --query 'properties.endpoints."AI Foundry API"' --output tsv
+$STORAGE_URL = az storage account show `
+  --name $STORAGE_NAME --resource-group $RESOURCE_GROUP `
+  --query primaryEndpoints.blob --output tsv
+
+az keyvault secret set --vault-name $KEY_VAULT --name DocumentIntelligenceEndpoint --value $DI_ENDPOINT --output none
+az keyvault secret set --vault-name $KEY_VAULT --name DocumentIntelligenceKey --value $DI_KEY --output none
+az keyvault secret set --vault-name $KEY_VAULT --name FoundryEndpoint --value $FOUNDRY_ENDPOINT --output none
+az keyvault secret set --vault-name $KEY_VAULT --name AzureBlobStorageUrl --value $STORAGE_URL --output none
+
+$env:AZURE_KEY_VAULT_URL = "https://$KEY_VAULT.vault.azure.net/"
+$env:AZURE_STORAGE_CONTAINER_NAME = $CONTAINER
+$env:DOCUMENT_INTELLIGENCE_MODEL_ID = "prebuilt-layout"
+$env:FOUNDRY_AGENT_NAME = "<agent-name-created-in-foundry>"
+$env:FOUNDRY_AGENT_VERSION = "1"
+```
+
+Put the non-secret environment values in the project-root `.env` for future
+sessions. Do not put the Document Intelligence key or other credentials in
+`.env`:
 
 ```env
-DOCUMENT_INTELLIGENCE_ENDPOINT=<document-intelligence-endpoint>
-DOCUMENT_INTELLIGENCE_KEY=<document-intelligence-key>
-DOCUMENT_INTELLIGENCE_MODEL_ID=prebuilt-read
-
-# Optional Foundry integration
-FOUNDRY_PROJECT_ENDPOINT=<foundry-project-endpoint>
-FOUNDRY_AGENT_NAME=<agent-name>
+AZURE_KEY_VAULT_URL=https://<key-vault-name>.vault.azure.net/
+AZURE_STORAGE_CONTAINER_NAME=documents
+DOCUMENT_INTELLIGENCE_MODEL_ID=prebuilt-layout
+FOUNDRY_AGENT_NAME=<agent-name-created-in-foundry>
 FOUNDRY_AGENT_VERSION=1
-FOUNDRY_MAX_OCR_CHARS=1500
 ```
 
-Do not commit `.env`. The project `.gitignore` already excludes it.
+## 5. Create the Foundry agent
 
-## Verify the resources
+The project code calls an agent by name and version. Sign in at
+[Microsoft Foundry](https://ai.azure.com), open the project you created, deploy
+a model available in your region, and create an agent that uses that model.
+Then set `FOUNDRY_AGENT_NAME` and `FOUNDRY_AGENT_VERSION` in `.env` to match.
+
+## Roles at a glance
+
+| Identity | Scope | Role | Why |
+|---|---|---|---|
+| Signed-in developer | Storage account | Storage Blob Data Contributor | Upload original files and OCR JSON |
+| Signed-in developer | Key Vault | Key Vault Secrets User | Read app configuration secrets |
+| Signed-in developer | Key Vault | Key Vault Secrets Officer | Create/update the app secrets |
+| Signed-in developer | Foundry project | Foundry User | Use the project agent |
+
+For a deployed API, assign the same runtime roles to the API's managed identity
+instead of a developer user. Do not give the deployed API `Key Vault Secrets
+Officer`; it only needs `Key Vault Secrets User`. Role assignments must be made
+by an identity with role-assignment permission at each resource scope.
+
+## Verify and clean up
+
+Check the resources and role assignments:
 
 ```powershell
-az cognitiveservices account show `
-  --name $DOCUMENT_RESOURCE `
-  --resource-group $RESOURCE_GROUP `
-  --query "{name:name,kind:kind,location:location,sku:sku.name}" `
-  --output table
+az cognitiveservices account show --name $DI_NAME --resource-group $RESOURCE_GROUP --query "{name:name,kind:kind,state:properties.provisioningState}" --output table
+az storage account show --name $STORAGE_NAME --resource-group $RESOURCE_GROUP --query "{name:name,location:location}" --output table
+az keyvault show --name $KEY_VAULT --resource-group $RESOURCE_GROUP --query "{name:name,location:location}" --output table
+az role assignment list --assignee $USER_ID --resource-group $RESOURCE_GROUP --query "[].{role:roleDefinitionName,scope:scope}" --output table
 ```
 
-Then run OCR:
+To delete everything created in this guide, delete the resource group. This
+permanently deletes every resource inside it:
 
 ```powershell
-.\.venv\Scripts\python.exe -m scripts.document_ocr `
-  "C:\path\to\document.pdf"
+az group delete --name $RESOURCE_GROUP --yes --no-wait
 ```
 
-Optionally run Foundry summarization:
+For app startup and API usage, see the [README](../README.md).
 
-```powershell
-.\.venv\Scripts\python.exe -m scripts.foundry_ocr `
-  ".\data\results\document_ocr_result.json"
-```
+## References
 
-## Cleanup
-
-Delete all resources created by this guide:
-
-```powershell
-az group delete `
-  --name $RESOURCE_GROUP `
-  --yes `
-  --no-wait
-```
-
-This deletes the resource group and every resource inside it. Confirm the
-resource group contains only resources that are safe to delete.
-
-## Notes
-
-- `prebuilt-read` does not require a custom model.
-- `prebuilt-invoice` can be passed with `--model-id prebuilt-invoice`.
-- Custom model availability depends on the Document Intelligence region.
-- Foundry is optional for this project.
-- Never print or commit API keys.
+- [Microsoft Foundry resource and project quickstart](https://learn.microsoft.com/azure/foundry/tutorials/quickstart-create-foundry-resources?tabs=azurecli)
+- [Azure CLI: Cognitive Services accounts and projects](https://learn.microsoft.com/cli/azure/cognitiveservices/account/project?view=azure-cli-latest)
+- [Azure CLI: Storage accounts](https://learn.microsoft.com/cli/azure/storage/account?view=azure-cli-latest)
+- [Azure CLI: Key Vault secrets](https://learn.microsoft.com/cli/azure/keyvault/secret?view=azure-cli-latest)
+- [Microsoft Foundry RBAC](https://learn.microsoft.com/azure/foundry/concepts/rbac-foundry)
+- [Azure Blob Storage role assignment](https://learn.microsoft.com/azure/storage/common/storage-auth-aad-rbac-cli)

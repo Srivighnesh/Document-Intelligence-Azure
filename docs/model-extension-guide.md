@@ -1,7 +1,7 @@
 # Adding Document-Specific Models
 
-This project supports changing the Azure Document Intelligence model without
-changing the Python code. Use the model ID that matches the document type.
+This project supports changing the Azure Document Intelligence model and its
+Foundry post-processing without adding model-specific workflow logic.
 
 ## Model choices
 
@@ -11,7 +11,7 @@ changing the Python code. Use the model ID that matches the document type.
 | General layout | `prebuilt-layout` | OCR plus tables and selection marks |
 | Invoices | `prebuilt-invoice` | Vendor, invoice ID, dates, totals, tax, line items |
 | Receipts | `prebuilt-receipt` | Merchant, date, totals, tax, purchased items |
-| Identity documents | `prebuilt-idDocument` | Name, date of birth, document number, expiry |
+| Identity documents | `prebuilt-idDocument` | Name, date of birth, expiry |
 | Custom document type | `<published-model-id>` | Fields defined by your custom model |
 
 ## Run a different model
@@ -95,10 +95,15 @@ business process.
 
 1. Train and publish a model in Document Intelligence Studio.
 2. Copy the published model ID.
-3. Set the ID in `.env` or pass it with `--model-id`.
-4. Add a dedicated Pydantic output model if the fields are fixed.
-5. Keep the Azure request code in `src/services/`.
-6. Keep document-specific mapping in a separate analyzer or writer.
+3. Add one `Profile` entry to `src/processing/profiles.py` with the model ID,
+   prompt, `kind="ocr"` for page-line text or `kind="fields"` for structured
+   fields, any optional text hints or field allowlist, and maximum prompt size.
+4. Set the ID in `.env` or pass it with `--model-id`.
+5. Add a dedicated Pydantic output model only if the fields are fixed.
+
+The workflow uses `get_profile()` and `run_agent()` for every model. Adding a
+model means adding one `Profile` in `src/processing/profiles.py`; no new
+caller or Foundry logic is required.
 
 Example:
 
@@ -107,6 +112,17 @@ Example:
   "C:\documents\custom-form.pdf" `
   --model-id "custom-form-v1"
 ```
+
+## Processing structure
+
+| Module | Responsibility |
+|---|---|
+| `src/processing/profiles.py` | Model IDs, prompts, extractor kinds, hints, fields, and limits |
+| `src/processing/text_select.py` | Pure OCR line selection and compaction |
+| `src/processing/extractors.py` | OCR or structured-field prompt text extraction |
+| `src/processing/summarize.py` | Applies a profile and invokes Foundry |
+| `src/services/foundry/client.py` | Azure Foundry SDK access |
+| `src/services/foundry/response.py` | JSON/text response parsing |
 
 ## Foundry remains optional
 

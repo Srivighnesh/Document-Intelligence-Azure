@@ -19,12 +19,12 @@ flowchart LR
     API --> CFG[Configuration<br/>src/config.py]
     CFG -->|DefaultAzureCredential| KV[Azure Key Vault]
     API --> WF[DocumentWorkflow]
-    WF -->|upload and download| BLOB[Azure Blob Storage]
+    WF -->|upload| BLOB[Azure Blob Storage]
     WF -->|document bytes + configured model ID| DI[Azure Document Intelligence]
-    DI -->|analysis dictionary| RW[ResultWriter]
-    RW -->|compact OCR JSON| LOCAL[data/results]
-    WF -->|OCR JSON path| FA[FoundryAgentClient]
-    FA -->|selected OCR text| F[Microsoft Foundry Agent]
+    DI -->|analysis dictionary| WF
+    WF -->|raw OCR JSON upload| OCRBLOB[Azure Blob Storage]
+    WF -->|profiled OCR text| FA[FoundryClient]
+    FA -->|prompt| F[Microsoft Foundry Agent]
     WF -->|metadata + agent response| API
     API --> U
 ```
@@ -39,18 +39,17 @@ Vault. Azure SDK clients authenticate with `DefaultAzureCredential`.
 POST /documents/analyze
   -> validate filename, content type, and 10 MB request limit
   -> upload the file to the configured Blob container
-  -> download the blob bytes for analysis
   -> call Document Intelligence using DOCUMENT_INTELLIGENCE_MODEL_ID
-  -> compact and save OCR output under data/results/
-  -> select relevant OCR lines and call the configured Foundry agent
-  -> return blob metadata, local OCR result path, and agent response
+  -> serialize and save the raw OCR result to Blob Storage
+  -> select and compact OCR lines using the model profile
+  -> call the configured Foundry agent
+  -> return blob metadata, model ID, and agent response
 ```
 
 The API currently handles a request synchronously: the client waits while
-storage, OCR, and Foundry processing complete. The API returns a Blob URL as
-metadata; it does not create a SAS URL. The OCR JSON is written to the local
-`data/results/` directory, so that path refers to the machine/container running
-the application.
+storage, OCR, and Foundry processing complete. The API returns Blob URLs as metadata; it does not create SAS URLs. The
+workflow stores the raw OCR JSON under the `ocr/` Blob prefix using the
+`ocr/<document>_ocr_result.json` blob name.
 
 ## Components
 
@@ -58,14 +57,19 @@ the application.
 |---|---|
 | `Backend/api.py` | FastAPI app, health route, upload validation, workflow construction |
 | `src/config.py` | Non-secret settings and Key Vault secret loading |
-| `src/services/document_workflow.py` | Coordinates Blob Storage, OCR, result writing, and Foundry |
+| `src/services/document_workflow.py` | Coordinates Blob Storage, OCR result storage, and Foundry |
 | `src/services/blob_storage.py` | Uploads and downloads documents in Blob Storage |
 | `src/services/document_intelligence.py` | Calls the configured Document Intelligence model |
-| `src/services/foundry_agent.py` | Selects OCR text, invokes the Foundry agent, parses its response |
+| `src/services/foundry/client.py` | Invokes the configured Foundry agent |
+| `src/services/foundry/response.py` | Parses Foundry JSON or text responses |
+| `src/processing/text_select.py` | Selects and compacts OCR lines |
+| `src/processing/profiles.py` | Maps models to prompts, extractor kinds, hints, and fields |
+| `src/processing/extractors.py` | Extracts OCR text or allowlisted model fields |
+| `src/processing/summarize.py` | Applies a profile and runs the Foundry client |
 | `src/models/result_writer.py` | Shapes OCR output into Pydantic models and writes JSON |
 | `scripts/document_ocr.py` | Runs OCR on a local file or URL from the command line |
 | `scripts/foundry_ocr.py` | Sends an existing OCR JSON result to Foundry |
-| `data/results/` | Local generated OCR and Foundry JSON files (ignored by Git) |
+| `data/results/` | Local generated CLI OCR and Foundry JSON files (ignored by Git) |
 | `docs/` | Architecture, schemas, Azure setup, and extension guides |
 
 ## Configuration and secrets
@@ -98,7 +102,6 @@ AZURE_STORAGE_CONTAINER_NAME=<existing-container>
 DOCUMENT_INTELLIGENCE_MODEL_ID=prebuilt-layout
 FOUNDRY_AGENT_NAME=<agent-name>
 FOUNDRY_AGENT_VERSION=1
-FOUNDRY_MAX_OCR_CHARS=1500
 ```
 
 Do not put keys, passwords, connection strings, or SAS tokens in `.env` or
@@ -163,7 +166,9 @@ Choose a model explicitly:
   "C:\path\to\document.pdf" --model-id prebuilt-read
 ```
 
-OCR results are written to `data/results/<document>_ocr_result.json`.
+The standalone OCR CLI writes results to
+`data/results/<document>_ocr_result.json`. API workflow OCR results are stored
+under `ocr/` in Blob Storage and returned as `ocrBlobName` and `ocrBlobUrl`.
 To send an existing result to Foundry:
 
 ```powershell
@@ -171,12 +176,17 @@ To send an existing result to Foundry:
   ".\data\results\document_ocr_result.json"
 ```
 
-The Foundry client selects OCR lines using field hints, removes duplicate
-lines, caps the text sent to the agent, and parses a JSON response when
-possible. If the agent returns non-JSON text, that text is preserved as the
-response. `FOUNDRY_REQUESTED_FIELDS` appears in `.env.example` and is read by
-`src/config.py`, but the current API does not pass it into `FoundryAgentClient`;
-the client therefore uses its built-in default field list.
+The processing profile selects an extractor, defines optional OCR hints or
+field allowlists, caps the text sent to the agent, and defines the prompt.
+Foundry parses a JSON response when possible; non-JSON text is preserved.
+
+## Adding a model
+
+Add one frozen `Profile` entry to
+`src/processing/profiles.py`, including the Document Intelligence model ID,
+prompt, `kind="ocr"` for page-line text or `kind="fields"` for structured
+fields, plus any hints or field allowlist and character limit. The workflow,
+API, and CLI then use it without new model-specific logic.
 
 ## API response
 
@@ -186,14 +196,16 @@ The `POST /documents/analyze` endpoint returns a response shaped like:
 {
   "blobName": "document.pdf",
   "blobUrl": "https://<account>.blob.core.windows.net/<container>/document.pdf",
-  "ocrResultPath": "<local-results-directory>/document_ocr_result.json",
-  "agentResponse": {}
+  "ocrBlobName": "ocr/document_ocr_result.json",
+  "ocrBlobUrl": "https://<account>.blob.core.windows.net/<container>/ocr/document_ocr_result.json",
+  "modelId": "prebuilt-layout",
+  "summary": {}
 }
 ```
 
 The response contains a Blob URL, not a download token. Protect the response
-and the local OCR output because documents and extracted text may contain
-sensitive data.
+and the OCR Blob because documents and extracted text may contain sensitive
+data.
 
 ## Current limitations and scale-up plan
 

@@ -204,7 +204,7 @@ The response should include:
   "modelId": "prebuilt-invoice",
   "classificationConfidence": 0.96,
   "extractedFields": {},
-  "agentResponse": {}
+  "summary": {}
 }
 ```
 

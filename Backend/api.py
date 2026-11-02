@@ -1,15 +1,18 @@
 """FastAPI application for document upload and analysis."""
 
-import os
+import logging
+from functools import lru_cache
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 
+from src.processing.profiles import get_profile
 from src.services.blob_storage import BlobStorageService
 from src.services.document_intelligence import DocumentAnalyzer
 from src.services.document_workflow import DocumentWorkflow
-from src.services.foundry_agent import FoundryAgentClient
+from src.services.foundry.client import FoundryClient
 
 app = FastAPI(title="Document Intelligence and Foundry Workflow")
+logger = logging.getLogger(__name__)
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 ALLOWED_CONTENT_TYPES = {
     "application/pdf",
@@ -20,6 +23,7 @@ ALLOWED_CONTENT_TYPES = {
 }
 
 
+@lru_cache(maxsize=1)
 def create_workflow() -> DocumentWorkflow:
     """Create workflow clients from existing environment configuration."""
     from src import config
@@ -32,11 +36,10 @@ def create_workflow() -> DocumentWorkflow:
         endpoint=config.DOCUMENT_INTELLIGENCE_ENDPOINT,
         key=config.DOCUMENT_INTELLIGENCE_KEY,
     )
-    foundry_agent = FoundryAgentClient(
+    foundry_agent = FoundryClient(
         project_endpoint=config.FOUNDRY_PROJECT_ENDPOINT,
         agent_name=config.FOUNDRY_AGENT_NAME,
         agent_version=config.FOUNDRY_AGENT_VERSION,
-        max_ocr_chars=config.FOUNDRY_MAX_OCR_CHARS,
     )
     return DocumentWorkflow(
         storage=storage,
@@ -53,7 +56,10 @@ def health() -> dict[str, str]:
 
 
 @app.post("/documents/analyze")
-async def analyze_document(file: UploadFile = File(...)) -> dict:
+def analyze_document(
+    file: UploadFile = File(...),
+    model_id: str | None = None,
+) -> dict:
     """Upload a document and return the Foundry agent response."""
     if not file.filename:
         raise HTTPException(status_code=400, detail="A filename is required.")
@@ -64,7 +70,7 @@ async def analyze_document(file: UploadFile = File(...)) -> dict:
         )
 
     try:
-        content = await file.read()
+        content = file.file.read(MAX_UPLOAD_BYTES + 1)
         if not content:
             raise HTTPException(status_code=400, detail="The file is empty.")
         if len(content) > MAX_UPLOAD_BYTES:
@@ -72,16 +78,22 @@ async def analyze_document(file: UploadFile = File(...)) -> dict:
                 status_code=413,
                 detail="The uploaded file must be 10 MB or smaller.",
             )
+        if model_id is not None:
+            get_profile(model_id)
         workflow = create_workflow()
         return workflow.process(
             filename=file.filename,
             content=content,
             content_type=file.content_type or "application/octet-stream",
+            model_id=model_id,
         )
     except HTTPException:
         raise
-    except Exception as error:
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except Exception:
+        logger.exception("Document processing failed.")
         raise HTTPException(
             status_code=502,
-            detail=f"Document workflow failed: {error}",
-        ) from error
+            detail="Document processing failed.",
+        )

@@ -80,9 +80,3 @@ DOCUMENT_INTELLIGENCE_MODEL_ID = os.getenv(
 )
 FOUNDRY_AGENT_NAME = _required_environment("FOUNDRY_AGENT_NAME")
 FOUNDRY_AGENT_VERSION = os.getenv("FOUNDRY_AGENT_VERSION")
-FOUNDRY_MAX_OCR_CHARS = int(os.getenv("FOUNDRY_MAX_OCR_CHARS", "1500"))
-FOUNDRY_REQUESTED_FIELDS = tuple(
-    field.strip()
-    for field in os.getenv("FOUNDRY_REQUESTED_FIELDS", "").split(",")
-    if field.strip()
-)

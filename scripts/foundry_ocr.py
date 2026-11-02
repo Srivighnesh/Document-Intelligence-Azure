@@ -1,9 +1,31 @@
 """Send a Document Intelligence OCR result to a Foundry agent."""
 
 import argparse
+import json
+import os
+from typing import Any
 
 from src import config
-from src.services.foundry_agent import FoundryAgentClient
+from src.processing.profiles import get_profile
+from src.processing.summarize import run_agent
+from src.services.foundry.client import FoundryClient
+
+
+def save_response(response: Any, source_name: str) -> str:
+    """Save the agent response beside the OCR result."""
+    result_directory = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)),
+        "data",
+        "results",
+    )
+    os.makedirs(result_directory, exist_ok=True)
+    output_path = os.path.join(
+        result_directory,
+        f"{os.path.splitext(os.path.basename(source_name))[0]}_foundry_result.json",
+    )
+    with open(output_path, "w", encoding="utf-8") as output_file:
+        json.dump(response, output_file, indent=2, ensure_ascii=False)
+    return output_path
 
 
 def main() -> None:
@@ -14,18 +36,11 @@ def main() -> None:
     parser.add_argument("ocr_file", help="Path to an OCR result JSON file.")
     parser.add_argument("--endpoint", default=config.FOUNDRY_PROJECT_ENDPOINT)
     parser.add_argument("--agent-name", default=config.FOUNDRY_AGENT_NAME)
-    parser.add_argument("--agent-version", default=config.FOUNDRY_AGENT_VERSION)
     parser.add_argument(
-        "--fields",
-        default=",".join(config.FOUNDRY_REQUESTED_FIELDS),
-        help="Comma-separated output field names.",
+        "--agent-version",
+        default=config.FOUNDRY_AGENT_VERSION,
     )
-    parser.add_argument(
-        "--max-chars",
-        type=int,
-        default=config.FOUNDRY_MAX_OCR_CHARS,
-        help="Maximum selected OCR characters sent to Foundry.",
-    )
+    parser.add_argument("--model-id", default=config.DOCUMENT_INTELLIGENCE_MODEL_ID)
     arguments = parser.parse_args()
 
     if not arguments.endpoint:
@@ -33,19 +48,16 @@ def main() -> None:
     if not arguments.agent_name:
         raise ValueError("Set FOUNDRY_AGENT_NAME or pass --agent-name.")
 
-    client = FoundryAgentClient(
+    profile = get_profile(arguments.model_id)
+    with open(arguments.ocr_file, encoding="utf-8") as ocr_file:
+        ocr = json.load(ocr_file)
+    client = FoundryClient(
         project_endpoint=arguments.endpoint,
         agent_name=arguments.agent_name,
         agent_version=arguments.agent_version,
-        max_ocr_chars=arguments.max_chars,
-        requested_fields=[
-            field.strip()
-            for field in arguments.fields.split(",")
-            if field.strip()
-        ],
     )
-    response = client.analyze_ocr_file(arguments.ocr_file)
-    output_path = client.save_response(response, arguments.ocr_file)
+    response = run_agent(ocr, profile, client)
+    output_path = save_response(response, arguments.ocr_file)
     print(f"Foundry response saved to: {output_path}")
 
 
