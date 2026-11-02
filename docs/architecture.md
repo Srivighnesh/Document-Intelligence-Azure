@@ -16,18 +16,18 @@ background queue, or MCP endpoint.
 
 ```mermaid
 flowchart LR
-    U[Client] -->|multipart PDF or image| API[FastAPI<br/>Backend/api.py]
-    API --> CFG[Configuration<br/>src/config.py]
-    CFG -->|DefaultAzureCredential| KV[Azure Key Vault]
-    API --> WF[DocumentWorkflow]
-    WF -->|upload original| BLOB[Azure Blob Storage]
-    WF -->|bytes + profile model ID| DI[Azure Document Intelligence]
-    DI -->|analysis dictionary| WF
-    WF -->|upload raw OCR JSON| OCR[Azure Blob Storage<br/>ocr/ prefix]
-    WF -->|profile-selected text or fields| SUM[Processing profile]
-    SUM -->|prompt| FA[FoundryClient]
-    FA -->|agent reference| F[Microsoft Foundry Agent]
-    WF -->|blob metadata + model ID + response| API
+    U[Client] -->|Base64 JSON + optional modelId| API[FastAPI]
+    CFG[Configuration] -->|DefaultAzureCredential| KV[Azure Key Vault]
+    API -->|validate and decode| WF[DocumentWorkflow]
+    WF -->|original bytes under uploads/| BLOB[Azure Blob Storage]
+    WF -->|bytes + selected model ID| DI[Azure Document Intelligence]
+    DI -->|analysis| WF
+    WF -->|profile fields or OCR fallback| EX[Profile extractors]
+    EX -->|fields-only JSON under results/| BLOB2[Azure Blob Storage]
+    EX -->|local copy| LOCAL[data/results/]
+    WF -. optional .->|analysis + profile| FA[FoundryClient]
+    FA -->|optional summary| WF
+    WF -->|Blob metadata + modelId + optional summary| API
     API --> U
 ```
 
