@@ -64,7 +64,10 @@ DOCUMENT_INTELLIGENCE_KEY = get_secret(
         "DocumentIntelligenceKey",
     )
 )
-FOUNDRY_PROJECT_ENDPOINT = _get_endpoint("FoundryEndpoint")
+FOUNDRY_ENABLED = os.getenv("FOUNDRY_ENABLED", "false").lower() == "true"
+FOUNDRY_PROJECT_ENDPOINT = (
+    _get_endpoint("FoundryEndpoint") if FOUNDRY_ENABLED else None
+)
 AZURE_STORAGE_ACCOUNT_URL = _get_endpoint(
     "AzureBlobStorageUrl",
     legacy_name="AzureBlobStorageURl",
@@ -78,5 +81,9 @@ DOCUMENT_INTELLIGENCE_MODEL_ID = os.getenv(
     "DOCUMENT_INTELLIGENCE_MODEL_ID",
     "prebuilt-layout",
 )
-FOUNDRY_AGENT_NAME = _required_environment("FOUNDRY_AGENT_NAME")
-FOUNDRY_AGENT_VERSION = os.getenv("FOUNDRY_AGENT_VERSION")
+FOUNDRY_AGENT_NAME = (
+    _required_environment("FOUNDRY_AGENT_NAME") if FOUNDRY_ENABLED else None
+)
+FOUNDRY_AGENT_VERSION = (
+    os.getenv("FOUNDRY_AGENT_VERSION") if FOUNDRY_ENABLED else None
+)

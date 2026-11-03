@@ -52,6 +52,11 @@ After the model is trained and published, set this in the project `.env` file:
 DOCUMENT_INTELLIGENCE_MODEL_ID=microsoft-10q-v1
 ```
 
+Set `DOCUMENT_INTELLIGENCE_MODEL_ID=microsoft-10q-v1` to use model-extracted
+fields by default, or pass `?modelId=microsoft-10q-v1` to the analysis API.
+The model profile provides field values and confidence scores; the existing
+`prebuilt-layout` profile uses an OCR-based fallback for 10-Q cover fields.
+
 Keep the existing endpoint and key variables:
 
 ```env
@@ -64,37 +69,31 @@ DOCUMENT_INTELLIGENCE_MODEL_ID=microsoft-10q-v1
 
 ```powershell
 .\.venv\Scripts\python.exe -m scripts.document_ocr `
-  "C:\Users\sircilla srivighnesh\Downloads\sample-layout.pdf"
+  "C:\path\to\sample-layout.pdf"
 ```
 
-The application writes the selected fields to:
+The CLI writes its page-oriented OCR result to:
 
 ```text
 data\results\sample-layout_ocr_result.json
 ```
 
-## Expected result shape
+## API result shape
 
 ```json
 {
-  "modelId": "microsoft-10q-v1",
-  "source": "C:\\Users\\sircilla srivighnesh\\Downloads\\sample-layout.pdf",
-  "documents": [
-    {
-      "fields": {
-        "companyName": {
-          "value": "MICROSOFT CORPORATION",
-          "content": "MICROSOFT CORPORATION",
-          "confidence": 0.95
-        },
-        "commissionFileNumber": {
-          "value": "001-37845",
-          "content": "001-37845",
-          "confidence": 0.95
-        }
-      }
+  "fields": {
+    "companyName": {
+      "value": "MICROSOFT CORPORATION",
+      "content": "MICROSOFT CORPORATION",
+      "confidence": 0.95
+    },
+    "commissionFileNumber": {
+      "value": "001-37845",
+      "content": "001-37845",
+      "confidence": 0.95
     }
-  ]
+  }
 }
 ```
 

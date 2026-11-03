@@ -1,9 +1,13 @@
 """Pure helpers for selecting and compacting OCR text."""
 
 import re
+from typing import Any
+
+DEFAULT_CONTEXT_LINES = 2
+DEFAULT_FALLBACK_LINES = 3
 
 
-def get_lines(ocr: dict) -> list[str]:
+def get_lines(ocr: dict[str, Any]) -> list[str]:
     """Return non-empty OCR lines in document order."""
     return [
         str(line["content"]).strip()
@@ -16,8 +20,8 @@ def get_lines(ocr: dict) -> list[str]:
 def select_relevant(
     lines: list[str],
     hints: tuple[str, ...] | list[str],
-    context: int = 2,
-    fallback: int = 3,
+    context: int = DEFAULT_CONTEXT_LINES,
+    fallback: int = DEFAULT_FALLBACK_LINES,
 ) -> list[str]:
     """Select matching lines and following context without duplicates."""
     selected_indexes: set[int] = set()

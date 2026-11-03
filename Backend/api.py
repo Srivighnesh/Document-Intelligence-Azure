@@ -3,17 +3,24 @@
 import logging
 from functools import lru_cache
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, HTTPException, Query
+from pydantic import BaseModel, ConfigDict, Field
 
+from src.processing.base64_document import (
+    Base64Document,
+    DEFAULT_MAX_BYTES,
+    DocumentTooLargeError,
+    EmptyDocumentError,
+    InvalidBase64Error,
+)
 from src.processing.profiles import get_profile
 from src.services.blob_storage import BlobStorageService
 from src.services.document_intelligence import DocumentAnalyzer
 from src.services.document_workflow import DocumentWorkflow
-from src.services.foundry.client import FoundryClient
 
 app = FastAPI(title="Document Intelligence and Foundry Workflow")
 logger = logging.getLogger(__name__)
-MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+MAX_UPLOAD_BYTES = DEFAULT_MAX_BYTES
 ALLOWED_CONTENT_TYPES = {
     "application/pdf",
     "image/jpeg",
@@ -21,6 +28,17 @@ ALLOWED_CONTENT_TYPES = {
     "image/tiff",
     "image/bmp",
 }
+base64_document = Base64Document(MAX_UPLOAD_BYTES)
+
+
+class AnalyzeRequest(BaseModel):
+    """JSON request containing a Base64 encoded document."""
+
+    model_config = ConfigDict(populate_by_name=True)
+    filename: str
+    content_type: str = Field(alias="contentType")
+    content_base64: str = Field(alias="contentBase64")
+    model_id: str | None = Field(default=None, alias="modelId")
 
 
 @lru_cache(maxsize=1)
@@ -36,11 +54,15 @@ def create_workflow() -> DocumentWorkflow:
         endpoint=config.DOCUMENT_INTELLIGENCE_ENDPOINT,
         key=config.DOCUMENT_INTELLIGENCE_KEY,
     )
-    foundry_agent = FoundryClient(
-        project_endpoint=config.FOUNDRY_PROJECT_ENDPOINT,
-        agent_name=config.FOUNDRY_AGENT_NAME,
-        agent_version=config.FOUNDRY_AGENT_VERSION,
-    )
+    foundry_agent = None
+    if config.FOUNDRY_ENABLED:
+        from src.services.foundry.client import FoundryClient
+
+        foundry_agent = FoundryClient(
+            project_endpoint=config.FOUNDRY_PROJECT_ENDPOINT,
+            agent_name=config.FOUNDRY_AGENT_NAME,
+            agent_version=config.FOUNDRY_AGENT_VERSION,
+        )
     return DocumentWorkflow(
         storage=storage,
         document_analyzer=document_analyzer,
@@ -57,35 +79,29 @@ def health() -> dict[str, str]:
 
 @app.post("/documents/analyze")
 def analyze_document(
-    file: UploadFile = File(...),
-    model_id: str | None = None,
+    request: AnalyzeRequest,
+    model_id: str | None = Query(default=None, alias="modelId"),
 ) -> dict:
-    """Upload a document and return the Foundry agent response."""
-    if not file.filename:
+    """Decode a JSON upload and return analysis metadata."""
+    selected_model_id = model_id or request.model_id
+    if not request.filename:
         raise HTTPException(status_code=400, detail="A filename is required.")
-    if file.content_type not in ALLOWED_CONTENT_TYPES:
+    if request.content_type not in ALLOWED_CONTENT_TYPES:
         raise HTTPException(
             status_code=415,
             detail="Only PDF, JPEG, PNG, TIFF, and BMP files are supported.",
         )
 
     try:
-        content = file.file.read(MAX_UPLOAD_BYTES + 1)
-        if not content:
-            raise HTTPException(status_code=400, detail="The file is empty.")
-        if len(content) > MAX_UPLOAD_BYTES:
-            raise HTTPException(
-                status_code=413,
-                detail="The uploaded file must be 10 MB or smaller.",
-            )
-        if model_id is not None:
-            get_profile(model_id)
+        content = _decode_content(request.content_base64)
+        if selected_model_id is not None:
+            get_profile(selected_model_id)
         workflow = create_workflow()
         return workflow.process(
-            filename=file.filename,
+            filename=request.filename,
             content=content,
-            content_type=file.content_type or "application/octet-stream",
-            model_id=model_id,
+            content_type=request.content_type,
+            model_id=selected_model_id,
         )
     except HTTPException:
         raise
@@ -97,3 +113,20 @@ def analyze_document(
             status_code=502,
             detail="Document processing failed.",
         )
+
+
+def _decode_content(value: str) -> bytes:
+    """Decode request Base64 and map document errors to HTTP responses."""
+    try:
+        return base64_document.decode(value)
+    except InvalidBase64Error as error:
+        raise HTTPException(
+            status_code=400, detail="Invalid Base64 content."
+        ) from error
+    except EmptyDocumentError as error:
+        raise HTTPException(status_code=400, detail="The file is empty.") from error
+    except DocumentTooLargeError as error:
+        raise HTTPException(
+            status_code=413,
+            detail="The uploaded file must be 10 MB or smaller.",
+        ) from error

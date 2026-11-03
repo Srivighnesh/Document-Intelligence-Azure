@@ -6,7 +6,7 @@ roles needed by the local developer account:
 - Azure AI Document Intelligence
 - Azure Blob Storage and a container
 - Azure Key Vault
-- A Microsoft Foundry account and project
+- Optional: a Microsoft Foundry account and project (only if enabling Foundry)
 
 The API uses `DefaultAzureCredential`, so these role assignments are for the
 identity you sign in with using `az login`. You need Azure CLI 2.80.0 or later
@@ -33,6 +33,7 @@ $DI_NAME = "<unique-document-intelligence-name>"
 $STORAGE_NAME = "<globally-unique-storage-name>"
 $CONTAINER = "documents"
 $KEY_VAULT = "<globally-unique-key-vault-name>"
+# Optional: only if enabling Foundry
 $FOUNDRY_NAME = "<globally-unique-foundry-name>"
 $FOUNDRY_PROJECT = "document-summary"
 ```
@@ -68,6 +69,7 @@ az keyvault create `
   --enable-rbac-authorization true `
   --enable-purge-protection true
 
+# Optional: only if enabling Foundry
 az cognitiveservices account create `
   --name $FOUNDRY_NAME `
   --resource-group $RESOURCE_GROUP `
@@ -97,6 +99,7 @@ $STORAGE_ID = az storage account show `
   --name $STORAGE_NAME --resource-group $RESOURCE_GROUP --query id --output tsv
 $VAULT_ID = az keyvault show `
   --name $KEY_VAULT --resource-group $RESOURCE_GROUP --query id --output tsv
+# Optional: only if enabling Foundry
 $PROJECT_ID = az cognitiveservices account project show `
   --name $FOUNDRY_NAME `
   --resource-group $RESOURCE_GROUP `
@@ -106,6 +109,7 @@ $PROJECT_ID = az cognitiveservices account project show `
 az role assignment create --assignee-object-id $USER_ID --assignee-principal-type User --role "Storage Blob Data Contributor" --scope $STORAGE_ID
 az role assignment create --assignee-object-id $USER_ID --assignee-principal-type User --role "Key Vault Secrets User" --scope $VAULT_ID
 az role assignment create --assignee-object-id $USER_ID --assignee-principal-type User --role "Key Vault Secrets Officer" --scope $VAULT_ID
+# Optional: only if enabling Foundry
 az role assignment create --assignee-object-id $USER_ID --assignee-principal-type User --role "53ca6127-db72-4b80-b1b0-d745d6d5456d" --scope $PROJECT_ID
 ```
 
@@ -136,6 +140,7 @@ $DI_ENDPOINT = az cognitiveservices account show `
 $DI_KEY = az cognitiveservices account keys list `
   --name $DI_NAME --resource-group $RESOURCE_GROUP `
   --query key1 --output tsv
+# Optional: only if enabling Foundry
 $FOUNDRY_ENDPOINT = az cognitiveservices account project show `
   --name $FOUNDRY_NAME `
   --resource-group $RESOURCE_GROUP `
@@ -147,14 +152,18 @@ $STORAGE_URL = az storage account show `
 
 az keyvault secret set --vault-name $KEY_VAULT --name DocumentIntelligenceEndpoint --value $DI_ENDPOINT --output none
 az keyvault secret set --vault-name $KEY_VAULT --name DocumentIntelligenceKey --value $DI_KEY --output none
+# Optional: only if enabling Foundry
 az keyvault secret set --vault-name $KEY_VAULT --name FoundryEndpoint --value $FOUNDRY_ENDPOINT --output none
 az keyvault secret set --vault-name $KEY_VAULT --name AzureBlobStorageUrl --value $STORAGE_URL --output none
 
 $env:AZURE_KEY_VAULT_URL = "https://$KEY_VAULT.vault.azure.net/"
 $env:AZURE_STORAGE_CONTAINER_NAME = $CONTAINER
 $env:DOCUMENT_INTELLIGENCE_MODEL_ID = "prebuilt-layout"
-$env:FOUNDRY_AGENT_NAME = "<agent-name-created-in-foundry>"
-$env:FOUNDRY_AGENT_VERSION = "1"
+# Optional: only if enabling Foundry
+$env:FOUNDRY_ENABLED = "false"
+# Set true and configure these when enabling Foundry.
+# $env:FOUNDRY_AGENT_NAME = "<agent-name-created-in-foundry>"
+# $env:FOUNDRY_AGENT_VERSION = "1"
 ```
 
 Put the non-secret environment values in the project-root `.env` for future
@@ -165,11 +174,13 @@ sessions. Do not put the Document Intelligence key or other credentials in
 AZURE_KEY_VAULT_URL=https://<key-vault-name>.vault.azure.net/
 AZURE_STORAGE_CONTAINER_NAME=documents
 DOCUMENT_INTELLIGENCE_MODEL_ID=prebuilt-layout
-FOUNDRY_AGENT_NAME=<agent-name-created-in-foundry>
-FOUNDRY_AGENT_VERSION=1
+FOUNDRY_ENABLED=false
+# Optional: only if enabling Foundry
+# FOUNDRY_AGENT_NAME=<agent-name-created-in-foundry>
+# FOUNDRY_AGENT_VERSION=1
 ```
 
-## 5. Create the Foundry agent
+## 5. Optional: only if enabling Foundry — create the Foundry agent
 
 The project code calls an agent by name and version. Sign in at
 [Microsoft Foundry](https://ai.azure.com), open the project you created, deploy

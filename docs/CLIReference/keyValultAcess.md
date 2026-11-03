@@ -12,8 +12,8 @@ az login
 $userId = az ad signed-in-user show --query id --output tsv
 
 $vaultId = az keyvault show `
-  --name kv-docintel-sv-2026-01 `
-  --resource-group rg-student-ai-korea `
+  --name <KEY_VAULT_NAME> `
+  --resource-group <RESOURCE_GROUP> `
   --query id `
   --output tsv
 ```

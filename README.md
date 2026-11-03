@@ -1,13 +1,13 @@
 # Document Intelligence and Foundry
 
-A Python document-processing backend that accepts a PDF or image, stores it in
-Azure Blob Storage, extracts OCR/layout information with Azure AI Document
-Intelligence, and sends selected text to a Microsoft Foundry agent for
-post-processing.
+A Python document-processing backend that accepts Base64 JSON, stores a PDF or
+image in Azure Blob Storage, and extracts OCR/layout information with Azure AI
+Document Intelligence. Optional Microsoft Foundry summaries are disabled by
+default.
 
-> **Current scope:** the API uses one configured Document Intelligence model
-> (default: `prebuilt-layout`). Automatic document classification, ID-specific
-> routing, a background job queue, and an MCP server are not implemented yet.
+> **Current scope:** the API uses a configured default model (`prebuilt-layout`)
+> or an explicitly selected profile. Automatic classification, a background
+> queue, and an MCP server are not implemented.
 
 ## Architecture
 
@@ -15,17 +15,18 @@ post-processing.
 
 ```mermaid
 flowchart LR
-    U[Client] -->|multipart PDF or image| API[FastAPI<br/>Backend/api.py]
-    API --> CFG[Configuration<br/>src/config.py]
-    CFG -->|DefaultAzureCredential| KV[Azure Key Vault]
-    API --> WF[DocumentWorkflow]
-    WF -->|upload| BLOB[Azure Blob Storage]
-    WF -->|document bytes + configured model ID| DI[Azure Document Intelligence]
-    DI -->|analysis dictionary| WF
-    WF -->|raw OCR JSON upload| OCRBLOB[Azure Blob Storage]
-    WF -->|profiled OCR text| FA[FoundryClient]
-    FA -->|prompt| F[Microsoft Foundry Agent]
-    WF -->|metadata + agent response| API
+    U[Client] -->|filename, content type, Base64, optional modelId| API[FastAPI]
+    CFG[Configuration] -->|DefaultAzureCredential| KV[Azure Key Vault]
+    API -->|validate and decode once| WF[DocumentWorkflow]
+    WF -->|original bytes under uploads/| BLOB[Azure Blob Storage]
+    WF -->|bytes + selected model ID| DI[Azure Document Intelligence]
+    DI -->|analysis| WF
+    WF -->|profile fields and OCR fallback| EX[Profile extractors]
+    EX -->|fields-only result JSON| BLOB2[Blob Storage results/]
+    EX -->|local copy| LOCAL[data/results/]
+    WF -.->|optional analysis + profile| FA[FoundryClient]
+    FA -->|optional summary| WF
+    WF -->|Blob metadata, modelId, optional summary| API
     API --> U
 ```
 
@@ -37,19 +38,27 @@ Vault. Azure SDK clients authenticate with `DefaultAzureCredential`.
 
 ```text
 POST /documents/analyze
-  -> validate filename, content type, and 10 MB request limit
-  -> upload the file to the configured Blob container
-  -> call Document Intelligence using DOCUMENT_INTELLIGENCE_MODEL_ID
-  -> serialize and save the raw OCR result to Blob Storage
-  -> select and compact OCR lines using the model profile
-  -> call the configured Foundry agent
-  -> return blob metadata, model ID, and agent response
+  -> validate filename, content type, and Base64 content (10 MB decoded limit)
+  -> upload original bytes under uploads/ in the configured Blob container
+  -> call Document Intelligence using the configured or requested model ID
+  -> extract allowlisted model fields, or parse profile fields from OCR lines
+  -> save only the fields object under results/ and data/results/
+  -> optionally call the Foundry agent when FOUNDRY_ENABLED=true
+  -> return Blob metadata, model ID, and optional summary
 ```
 
-The API currently handles a request synchronously: the client waits while
-storage, OCR, and Foundry processing complete. The API returns Blob URLs as metadata; it does not create SAS URLs. The
-workflow stores the raw OCR JSON under the `ocr/` Blob prefix using the
-`ocr/<document>_ocr_result.json` blob name.
+The API handles requests synchronously. Clients send JSON with `filename`,
+`contentType`, `contentBase64`, and optional `modelId` (in the JSON body or as
+the `?modelId=` query parameter). `Base64Document` strips
+data URL headers, validates and decodes Base64 once, and enforces the decoded
+size limit. The Azure SDK receives the resulting raw bytes. The result JSON
+contains a `fields` object only; it omits full OCR text and Azure layout
+metadata. The API returns Blob URLs as metadata and does not create SAS URLs.
+Original PDFs are stored
+under `uploads/` with a unique name; compact results are stored under
+`results/<unique-document-name>_ocr_result.json` and copied locally to
+`data/results/`. These result files contain only profile-selected fields,
+without the full OCR text or Azure analysis payload.
 
 ## Components
 
@@ -57,13 +66,16 @@ workflow stores the raw OCR JSON under the `ocr/` Blob prefix using the
 |---|---|
 | `Backend/api.py` | FastAPI app, health route, upload validation, workflow construction |
 | `src/config.py` | Non-secret settings and Key Vault secret loading |
-| `src/services/document_workflow.py` | Coordinates Blob Storage, OCR result storage, and Foundry |
+| `src/processing/base64_document.py` | Validates and converts Base64 document content |
+| `src/processing/profiles.py` | Defines model IDs, field allowlists, hints, and prompts |
+| `src/processing/field_parser.py` | Parses profile fields from OCR when model fields are absent |
+| `src/processing/field_values.py` | Normalizes Azure field values for compact results |
+| `src/services/document_workflow.py` | Coordinates upload, analysis, result storage, and optional Foundry |
 | `src/services/blob_storage.py` | Uploads and downloads documents in Blob Storage |
 | `src/services/document_intelligence.py` | Calls the configured Document Intelligence model |
 | `src/services/foundry/client.py` | Invokes the configured Foundry agent |
 | `src/services/foundry/response.py` | Parses Foundry JSON or text responses |
 | `src/processing/text_select.py` | Selects and compacts OCR lines |
-| `src/processing/profiles.py` | Maps models to prompts, extractor kinds, hints, and fields |
 | `src/processing/extractors.py` | Extracts OCR text or allowlisted model fields |
 | `src/processing/summarize.py` | Applies a profile and runs the Foundry client |
 | `src/models/result_writer.py` | Shapes OCR output into Pydantic models and writes JSON |
@@ -87,7 +99,7 @@ Key Vault by `src/config.py`:
 |---|---|
 | `DocumentIntelligenceEndpoint` | Document Intelligence endpoint |
 | `DocumentIntelligenceKey` | Document Intelligence API key |
-| `FoundryEndpoint` | Foundry project endpoint |
+| `FoundryEndpoint` | Optional Foundry project endpoint; read only when Foundry is enabled |
 | `AzureBlobStorageUrl` | Blob Storage account URL |
 
 The legacy secret name `AzureBlobStorageURl` is accepted as a fallback. You can
@@ -100,9 +112,15 @@ Example non-secret settings (see `.env.example` for the full list):
 AZURE_KEY_VAULT_URL=https://<vault-name>.vault.azure.net/
 AZURE_STORAGE_CONTAINER_NAME=<existing-container>
 DOCUMENT_INTELLIGENCE_MODEL_ID=prebuilt-layout
-FOUNDRY_AGENT_NAME=<agent-name>
-FOUNDRY_AGENT_VERSION=1
+FOUNDRY_ENABLED=false
+# Required only when FOUNDRY_ENABLED=true
+# FOUNDRY_AGENT_NAME=<agent-name>
+# FOUNDRY_AGENT_VERSION=1
 ```
+
+When Foundry is disabled, its endpoint and agent settings are not loaded and
+the app starts without them. To enable summaries, set `FOUNDRY_ENABLED=true`
+and configure the Foundry endpoint secret, agent name, and optional version.
 
 Do not put keys, passwords, connection strings, or SAS tokens in `.env` or
 source code. Keep `.env` local and out of Git.
@@ -116,7 +134,7 @@ managed identity where possible.
 |---|---|
 | Key Vault | `Key Vault Secrets User` |
 | Blob Storage | `Storage Blob Data Contributor` (uploads and downloads) |
-| Foundry project | A project role that allows the identity to use the agent |
+| Foundry project (optional) | A project role that allows the identity to use the agent |
 
 Role assignments can take several minutes to propagate. Azure management-plane
 `Contributor` by itself does not grant Blob data access.
@@ -144,12 +162,40 @@ Upload a supported file:
 
 ```powershell
 curl.exe -X POST "http://127.0.0.1:8000/documents/analyze" `
-  -F "file=@C:\path\to\document.pdf"
+  -H "Content-Type: application/json" `
+  -d '{"filename":"document.pdf","contentType":"application/pdf","contentBase64":"<base64-content>"}'
 ```
 
 Supported media types are PDF, JPEG, PNG, TIFF, and BMP. The API limit is
-10 MB. This endpoint requires the Key Vault, Blob Storage, Document
-Intelligence, and Foundry settings and permissions described above.
+10 MB. This endpoint requires Key Vault, Blob Storage, and Document
+Intelligence settings and permissions. Foundry is optional and disabled by
+default.
+
+### Start and test with a Base64 image
+
+Open PowerShell in the project root. In the first terminal, activate the
+project environment and start the API:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
+& .\.venv\Scripts\Activate.ps1
+python -m uvicorn Backend.api:app --reload
+```
+
+Keep that terminal running. Open a second PowerShell terminal in the project
+root, activate the environment, and submit the Base64 image created in
+`byte64-convert\result\`:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
+& .\.venv\Scripts\Activate.ps1
+$b64 = (Get-Content -Raw -LiteralPath ".\byte64-convert\result\pancard.png.base64.txt").Trim()
+$body = @{ filename = "pancard.png"; contentType = "image/png"; contentBase64 = $b64 } | ConvertTo-Json -Compress
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8000/documents/analyze?modelId=prebuilt-idDocument" -ContentType "application/json" -Body $body
+```
+
+The response includes the uploaded Blob names and URLs, plus the selected
+`modelId`.
 
 ## Command-line workflows
 
@@ -166,10 +212,10 @@ Choose a model explicitly:
   "C:\path\to\document.pdf" --model-id prebuilt-read
 ```
 
-The standalone OCR CLI writes results to
-`data/results/<document>_ocr_result.json`. API workflow OCR results are stored
-under `ocr/` in Blob Storage and returned as `ocrBlobName` and `ocrBlobUrl`.
-To send an existing result to Foundry:
+The standalone OCR CLI and API workflow write compact result files to
+`data/results/`. API workflow results are also stored
+under `results/` in Blob Storage and returned as `ocrBlobName` and
+`ocrBlobUrl`. To send an existing result to Foundry, first enable Foundry:
 
 ```powershell
 .\.venv\Scripts\python.exe -m scripts.foundry_ocr `
@@ -190,18 +236,22 @@ API, and CLI then use it without new model-specific logic.
 
 ## API response
 
-The `POST /documents/analyze` endpoint returns a response shaped like:
+The `POST /documents/analyze` endpoint returns this response when Foundry is
+disabled:
 
 ```json
 {
-  "blobName": "document.pdf",
-  "blobUrl": "https://<account>.blob.core.windows.net/<container>/document.pdf",
-  "ocrBlobName": "ocr/document_ocr_result.json",
-  "ocrBlobUrl": "https://<account>.blob.core.windows.net/<container>/ocr/document_ocr_result.json",
-  "modelId": "prebuilt-layout",
-  "summary": {}
+  "blobName": "uploads/<unique>_document.pdf",
+  "blobUrl": "https://<account>.blob.core.windows.net/<container>/uploads/<unique>_document.pdf",
+  "ocrBlobName": "results/<unique>_document_ocr_result.json",
+  "ocrBlobUrl": "https://<account>.blob.core.windows.net/<container>/results/<unique>_document_ocr_result.json",
+  "modelId": "prebuilt-layout"
 }
 ```
+
+When Foundry is enabled, a `summary` property is added. It is omitted entirely
+when Foundry is disabled. The stored JSON contains the allowlisted `fields`
+object only; it omits the full OCR text and Azure layout metadata.
 
 The response contains a Blob URL, not a download token. Protect the response
 and the OCR Blob because documents and extracted text may contain sensitive

@@ -60,9 +60,9 @@ invoice_ocr_result.json
 `prebuilt-invoice`, `prebuilt-receipt`, and custom extraction models return
 structured fields under `documents[].fields`.
 
-Therefore, a production application should use a model-specific Pydantic
-writer when it needs typed fields. The current OCR writer is intended for
-`prebuilt-read` output.
+The API profiles select allowlisted fields from structured models and use
+profile-specific OCR fallback parsing when model fields are absent. The CLI
+`ResultWriter` continues to write its separate page-oriented OCR schema.
 
 ## Recommended invoice model
 

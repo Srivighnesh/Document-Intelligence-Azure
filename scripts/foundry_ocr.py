@@ -6,6 +6,7 @@ import os
 from typing import Any
 
 from src import config
+from src.processing.file_names import source_stem
 from src.processing.profiles import get_profile
 from src.processing.summarize import run_agent
 from src.services.foundry.client import FoundryClient
@@ -21,7 +22,7 @@ def save_response(response: Any, source_name: str) -> str:
     os.makedirs(result_directory, exist_ok=True)
     output_path = os.path.join(
         result_directory,
-        f"{os.path.splitext(os.path.basename(source_name))[0]}_foundry_result.json",
+        f"{source_stem(source_name)}_foundry_result.json",
     )
     with open(output_path, "w", encoding="utf-8") as output_file:
         json.dump(response, output_file, indent=2, ensure_ascii=False)
@@ -30,6 +31,8 @@ def save_response(response: Any, source_name: str) -> str:
 
 def main() -> None:
     """Invoke the configured Foundry agent with an OCR JSON file."""
+    if not config.FOUNDRY_ENABLED:
+        raise RuntimeError("Foundry is disabled. Set FOUNDRY_ENABLED=true.")
     parser = argparse.ArgumentParser(
         description="Send OCR output to a Microsoft Foundry agent."
     )

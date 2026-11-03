@@ -18,7 +18,31 @@ class Profile:
 
 # To support a new model, add one Profile here.
 _PROFILE_LIST = [
-    
+    Profile(
+        model_id="microsoft-10q-v1",
+        prompt="Summarize these company and reporting fields concisely:\n{data}",
+        hints=(
+            "commission file number",
+            "period ended",
+            "incorporation",
+            "telephone",
+            "trading symbol",
+            "name of exchange",
+            "street",
+            "address",
+        ),
+        kind="fields",
+        fields=(
+            "companyName",
+            "commissionFileNumber",
+            "reportingPeriodEndDate",
+            "incorporationState",
+            "companyAddress",
+            "telephoneNumber",
+            "tickerSymbols",
+            "exchangeNames",
+        ),
+    ),
     Profile(
         model_id="prebuilt-layout",
         prompt=(
