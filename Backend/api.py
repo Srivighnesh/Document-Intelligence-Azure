@@ -16,7 +16,10 @@ from src.processing.base64_document import (
 from src.processing.profiles import get_profile
 from src.services.blob_storage import BlobStorageService
 from src.services.document_intelligence import DocumentAnalyzer
-from src.services.document_workflow import DocumentWorkflow
+from src.services.document_workflow import (
+    DocumentWorkflow,
+    UnreadableDocumentError,
+)
 
 app = FastAPI(title="Document Intelligence and Foundry Workflow")
 logger = logging.getLogger(__name__)
@@ -94,7 +97,7 @@ def analyze_document(
 
     try:
         content = _decode_content(request.content_base64)
-        if selected_model_id is not None:
+        if selected_model_id is not None and selected_model_id.casefold() != "auto":
             get_profile(selected_model_id)
         workflow = create_workflow()
         return workflow.process(
@@ -105,6 +108,8 @@ def analyze_document(
         )
     except HTTPException:
         raise
+    except UnreadableDocumentError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except Exception:

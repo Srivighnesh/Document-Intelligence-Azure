@@ -5,84 +5,65 @@ image in Azure Blob Storage, and extracts OCR/layout information with Azure AI
 Document Intelligence. Optional Microsoft Foundry summaries are disabled by
 default.
 
-> **Current scope:** the API uses a configured default model (`prebuilt-layout`)
-> or an explicitly selected profile. Automatic classification, a background
-> queue, and an MCP server are not implemented.
+> **Current scope:** the API supports a configured model, an explicitly selected
+> model, or `modelId=auto` for OCR-text-based routing. Requests run synchronously;
+> batch uploads, a background queue, and an MCP server are not implemented.
 
 ## Architecture
 
-### Current runtime
+### Request flow
 
 ```mermaid
 flowchart LR
-    U[Client] -->|filename, content type, Base64, optional modelId| API[FastAPI]
-    CFG[Configuration] -->|DefaultAzureCredential| KV[Azure Key Vault]
-    API -->|validate and decode once| WF[DocumentWorkflow]
-    WF -->|original bytes under uploads/| BLOB[Azure Blob Storage]
-    WF -->|bytes + selected model ID| DI[Azure Document Intelligence]
-    DI -->|analysis| WF
-    WF -->|profile fields and OCR fallback| EX[Profile extractors]
-    EX -->|fields-only result JSON| BLOB2[Blob Storage results/]
-    EX -->|local copy| LOCAL[data/results/]
-    WF -.->|optional analysis + profile| FA[FoundryClient]
-    FA -->|optional summary| WF
-    WF -->|Blob metadata, modelId, optional summary| API
-    API --> U
+    CLIENT[Client] --> API[API: validate and decode]
+    API --> CACHE{Cache hit?}
+    CACHE -->|Yes| CACHED[Return duplicate true]
+    CACHE -->|No| MODE{Model choice}
+    MODE -->|Fixed ID| DI[Document Intelligence]
+    MODE -->|auto| OCR[Layout OCR and text routing]
+    OCR --> DI
+    DI --> EXTRACT[Extract fields]
+    EXTRACT --> STORE[Store source, full OCR, result]
+    STORE -->|Foundry on| SUMMARY[Generate summary]
+    STORE -->|Foundry off| MANIFEST[Write manifest and return duplicate false]
+    SUMMARY --> MANIFEST
 ```
 
-`src/config.py` reads non-secret settings from environment variables / `.env`
-and retrieves service endpoints and the Document Intelligence key from Key
-Vault. Azure SDK clients authenticate with `DefaultAzureCredential`.
+`modelId=auto` first runs layout OCR, then routes from text cues for invoices,
+receipts, identity documents, and 10-Q-style filings. Unclear text falls back
+to layout. This is keyword-based routing, not a trained classifier. Explicit
+model IDs skip the routing OCR pass.
 
-### Request sequence
+The cache key uses file bytes and model/profile settings, not the filename.
+Same content with the same settings reuses the completed manifest and returns
+`duplicate: true`; changed content gets a separate result. Blank or unreadable
+documents return HTTP `422` before blobs are written. Requests are synchronous
+and accept one file each.
 
-```text
-POST /documents/analyze
-  -> validate filename, content type, and Base64 content (10 MB decoded limit)
-  -> upload original bytes under uploads/ in the configured Blob container
-  -> call Document Intelligence using the configured or requested model ID
-  -> extract allowlisted model fields, or parse profile fields from OCR lines
-  -> save only the fields object under results/ and data/results/
-  -> optionally call the Foundry agent when FOUNDRY_ENABLED=true
-  -> return Blob metadata, model ID, and optional summary
-```
+### Components in request order
 
-The API handles requests synchronously. Clients send JSON with `filename`,
-`contentType`, `contentBase64`, and optional `modelId` (in the JSON body or as
-the `?modelId=` query parameter). `Base64Document` strips
-data URL headers, validates and decodes Base64 once, and enforces the decoded
-size limit. The Azure SDK receives the resulting raw bytes. The result JSON
-contains a `fields` object only; it omits full OCR text and Azure layout
-metadata. The API returns Blob URLs as metadata and does not create SAS URLs.
-Original PDFs are stored
-under `uploads/` with a unique name; compact results are stored under
-`results/<unique-document-name>_ocr_result.json` and copied locally to
-`data/results/`. These result files contain only profile-selected fields,
-without the full OCR text or Azure analysis payload.
+1. **Receive the request:** `Backend/api.py` exposes `/documents/analyze`;
+   `src/processing/base64_document.py` decodes and size-checks the upload.
+2. **Configure services:** `src/config.py` reads settings and Key Vault secrets.
+   Azure clients use `DefaultAzureCredential`.
+3. **Choose and run a model:** `src/services/document_workflow.py` checks the
+   content cache, selects a fixed profile or calls
+   `src/processing/document_classifier.py` for auto routing. Profiles and
+   allowlists are in `src/processing/profiles.py`; Azure calls are made by
+   `src/services/document_intelligence.py`.
+4. **Shape the result:** `src/processing/extractors.py` extracts profile fields.
+   `src/processing/field_parser.py` supplies OCR-label fallbacks, and
+   `src/processing/field_values.py` normalizes Azure values.
+5. **Store and return:** `src/services/blob_storage.py` writes the source,
+   full analysis, compact result, and completed manifest. The compact result
+   links to the full OCR JSON. `data/results/` also holds a local result copy.
+6. **Optional summary:** `src/processing/summarize.py` calls
+   `src/services/foundry/client.py`; `src/services/foundry/response.py` parses
+   the response when Foundry is enabled.
 
-## Components
-
-| Path | Responsibility |
-|---|---|
-| `Backend/api.py` | FastAPI app, health route, upload validation, workflow construction |
-| `src/config.py` | Non-secret settings and Key Vault secret loading |
-| `src/processing/base64_document.py` | Validates and converts Base64 document content |
-| `src/processing/profiles.py` | Defines model IDs, field allowlists, hints, and prompts |
-| `src/processing/field_parser.py` | Parses profile fields from OCR when model fields are absent |
-| `src/processing/field_values.py` | Normalizes Azure field values for compact results |
-| `src/services/document_workflow.py` | Coordinates upload, analysis, result storage, and optional Foundry |
-| `src/services/blob_storage.py` | Uploads and downloads documents in Blob Storage |
-| `src/services/document_intelligence.py` | Calls the configured Document Intelligence model |
-| `src/services/foundry/client.py` | Invokes the configured Foundry agent |
-| `src/services/foundry/response.py` | Parses Foundry JSON or text responses |
-| `src/processing/text_select.py` | Selects and compacts OCR lines |
-| `src/processing/extractors.py` | Extracts OCR text or allowlisted model fields |
-| `src/processing/summarize.py` | Applies a profile and runs the Foundry client |
-| `src/models/result_writer.py` | Shapes OCR output into Pydantic models and writes JSON |
-| `scripts/document_ocr.py` | Runs OCR on a local file or URL from the command line |
-| `scripts/foundry_ocr.py` | Sends an existing OCR JSON result to Foundry |
-| `data/results/` | Local generated CLI OCR and Foundry JSON files (ignored by Git) |
-| `docs/` | Architecture, schemas, Azure setup, and extension guides |
+The standalone `scripts/document_ocr.py` and `scripts/foundry_ocr.py` commands
+support local-file workflows. `docs/` contains Azure setup, schemas, and
+extension guides.
 
 ## Configuration and secrets
 
@@ -199,7 +180,76 @@ The response includes the uploaded Blob names and URLs, plus the selected
 
 ## Command-line workflows
 
-Run OCR on a local file:
+### Use the API workflow from PowerShell
+
+Start the API from the project root, then send requests from a second window:
+
+```powershell
+\.venv\Scripts\python.exe -m uvicorn Backend.api:app --reload
+```
+
+Submit one Base64 file with automatic model routing:
+
+```powershell
+$b64 = (Get-Content -Raw -LiteralPath ".\byte64-convert\result\invoice.pdf.base64.txt").Trim()
+$body = @{
+    filename      = "invoice.pdf"
+    contentType   = "application/pdf"
+    contentBase64 = $b64
+    modelId       = "auto"
+} | ConvertTo-Json -Compress
+
+$response = Invoke-RestMethod -Method Post `
+    -Uri "http://127.0.0.1:8000/documents/analyze" `
+    -ContentType "application/json" -Body $body
+$response | Format-List
+```
+
+The endpoint accepts one file per request. Repeating the request with the
+same content and settings returns `duplicate: true`. The response includes the
+selected model and full-OCR Blob URL.
+
+To submit all Base64 files in a folder, loop over them:
+
+```powershell
+$folder = ".\byte64-convert\result"
+$uri = "http://127.0.0.1:8000/documents/analyze"
+
+Get-ChildItem -LiteralPath $folder -Filter "*.base64.txt" | ForEach-Object {
+    $filename = $_.Name -replace '\.base64\.txt$', ''
+    $contentType = switch ([IO.Path]::GetExtension($filename).ToLowerInvariant()) {
+        ".pdf"  { "application/pdf" }
+        ".png"  { "image/png" }
+        ".jpg"  { "image/jpeg" }
+        ".jpeg" { "image/jpeg" }
+        ".tif"  { "image/tiff" }
+        ".tiff" { "image/tiff" }
+        ".bmp"  { "image/bmp" }
+        default { throw "Unsupported file type: $filename" }
+    }
+    $b64 = (Get-Content -Raw -LiteralPath $_.FullName).Trim()
+    $body = @{
+        filename      = $filename
+        contentType   = $contentType
+        contentBase64 = $b64
+        modelId       = "auto"
+    } | ConvertTo-Json -Compress
+
+    $response = Invoke-RestMethod -Method Post -Uri $uri `
+        -ContentType "application/json" -Body $body
+    [PSCustomObject]@{
+        File      = $filename
+        Model     = $response.modelId
+        Duplicate = $response.duplicate
+        FullOcr   = $response.fullOcrBlobUrl
+    }
+}
+```
+
+Each decoded file must be 10 MB or smaller. Keep its original extension in the
+Base64 filename, for example `invoice.pdf.base64.txt`.
+
+### Run OCR directly on a local file
 
 ```powershell
 .\.venv\Scripts\python.exe -m scripts.document_ocr "C:\path\to\document.pdf"
@@ -212,18 +262,16 @@ Choose a model explicitly:
   "C:\path\to\document.pdf" --model-id prebuilt-read
 ```
 
-The standalone OCR CLI and API workflow write compact result files to
-`data/results/`. API workflow results are also stored
-under `results/` in Blob Storage and returned as `ocrBlobName` and
-`ocrBlobUrl`. To send an existing result to Foundry, first enable Foundry:
+The standalone OCR CLI writes a local result under `data/results/`; it does not
+use auto routing, the API cache, or Blob Storage. The API workflow also stores
+the compact result and full OCR analysis in Blob Storage. To send an existing
+result to Foundry, first enable Foundry:
 
 ```powershell
 .\.venv\Scripts\python.exe -m scripts.foundry_ocr `
   ".\data\results\document_ocr_result.json"
 ```
 
-The processing profile selects an extractor, defines optional OCR hints or
-field allowlists, caps the text sent to the agent, and defines the prompt.
 Foundry parses a JSON response when possible; non-JSON text is preserved.
 
 ## Adding a model
@@ -241,42 +289,83 @@ disabled:
 
 ```json
 {
-  "blobName": "uploads/<unique>_document.pdf",
-  "blobUrl": "https://<account>.blob.core.windows.net/<container>/uploads/<unique>_document.pdf",
-  "ocrBlobName": "results/<unique>_document_ocr_result.json",
-  "ocrBlobUrl": "https://<account>.blob.core.windows.net/<container>/results/<unique>_document_ocr_result.json",
-  "modelId": "prebuilt-layout"
+  "blobName": "uploads/<sha256>",
+  "blobUrl": "https://<account>.blob.core.windows.net/<container>/uploads/<sha256>",
+  "ocrBlobName": "results/<cache-key>_ocr_result.json",
+  "ocrBlobUrl": "https://<account>.blob.core.windows.net/<container>/results/<cache-key>_ocr_result.json",
+  "fullOcrBlobName": "full-ocr/<cache-key>_full_ocr_result.json",
+  "fullOcrBlobUrl": "https://<account>.blob.core.windows.net/<container>/full-ocr/<cache-key>_full_ocr_result.json",
+  "modelId": "prebuilt-layout",
+  "duplicate": false
 }
 ```
 
 When Foundry is enabled, a `summary` property is added. It is omitted entirely
-when Foundry is disabled. The stored JSON contains the allowlisted `fields`
-object only; it omits the full OCR text and Azure layout metadata.
+when Foundry is disabled. The compact result JSON contains the allowlisted
+`fields` plus links to the full analysis object.
 
-The response contains a Blob URL, not a download token. Protect the response
-and the OCR Blob because documents and extracted text may contain sensitive
-data.
+The response contains Blob URLs, not download tokens. Protect the response,
+the OCR result, and the full-analysis Blob because they may contain sensitive
+identity data and extracted text.
+
+Blank or unreadable documents return HTTP `422` and are rejected before the
+source, full analysis, result, or cache manifest is written to Blob Storage.
+
+## Quick summary and edge cases
+
+The project accepts one Base64 PDF/image per API request, extracts fields with
+Azure Document Intelligence, optionally generates a Foundry summary, and stores
+the source, compact result, full analysis, and cache manifest in Blob Storage.
+Use `modelId=auto` for OCR-text-based routing; fixed model IDs always use the
+requested profile.
+
+### Duplicate handling
+
+- The cache key uses file bytes and model/profile settings, not the filename.
+- Same bytes and same settings return the saved response with `duplicate: true`.
+- Different bytes under the same filename are processed as a new document.
+- Same bytes with a different fixed model/profile use a separate result.
+- The first completed run returns `duplicate: false`. A failed run does not
+  get a completed manifest, so a later request retries processing.
+- Simultaneous identical requests can race and both run analysis. Existing
+  historical UUID-named blobs are not automatically removed.
+
+### Common input errors
+
+| Situation | API response | What to check |
+|---|---:|---|
+| Missing filename, malformed Base64, empty decoded file, or unknown model ID | `400` | Include a filename, valid Base64, non-empty bytes, and supported model ID. |
+| Unsupported `contentType` | `415` | Use PDF, JPEG, PNG, TIFF, or BMP MIME type. |
+| Decoded file larger than 10 MB | `413` | Reduce or split the document. |
+| Azure finds no readable text or extracted fields | `422` | Check the file is readable and use the matching model or `auto`. No blobs are written for this case. |
+| Azure, Blob Storage, or Foundry processing fails | `502` | Check service availability, credentials, and permissions. A failure before manifest creation can leave some uploaded artifacts; retrying may analyze again. |
+
+The API checks that `contentType` is one of the supported values, but does not
+verify it against the file's actual bytes. Keep the filename extension and MIME
+type consistent with the file. Selecting the wrong fixed model is not always an
+error: it can return null or low-confidence fields. `auto` uses keyword cues;
+unclear documents fall back to `prebuilt-layout`. The classifier is not trained,
+and simultaneous duplicate requests are not locked.
 
 ## Current limitations and scale-up plan
 
 The following are useful next steps; they are **not current features**:
 
-1. **Classify, then route.** Add a Document Intelligence custom classifier to
-   detect types such as ID, invoice, receipt, or other. Route each class to its
-   appropriate analyzer and provide an unknown/low-confidence path for review.
-2. **Add ID extraction.** Route ID documents to the prebuilt ID document model
-   (`prebuilt-idDocument`) while preserving the current layout OCR path for
-   other documents. Confirm the model's supported ID types for your region and
-   scenario before relying on extracted fields.
+1. **Improve document routing.** Replace the keyword-based auto router with a
+   trained Document Intelligence classifier and add an unknown/low-confidence
+   review path.
+2. **Expand ID field coverage.** The current ID profile uses
+   `prebuilt-idDocument`; address extraction from OCR is label-based and varies
+   by document type. Validate supported ID types and fields for your scenario.
 3. **Move long work off the request.** For higher volume, accept and store the
    upload, enqueue a job, and return a job ID. Background workers can run OCR
    and Foundry processing; add a status/result endpoint for clients.
 4. **Use durable result storage.** Store OCR/agent results in Blob Storage or a
    database instead of relying on the local `data/results/` folder when
    deploying multiple instances or containers.
-5. **Make processing safer to retry.** Use unique document/job identifiers,
-   avoid overwriting blobs that share a filename, track processing states, and
-   make retries idempotent.
+5. **Handle concurrent duplicate requests.** The cache check avoids repeated
+   sequential work; add a distributed lock if simultaneous identical requests
+   must never run Document Intelligence twice.
 6. **Add operational controls.** Add structured logs with correlation IDs,
    metrics, timeouts, retry policies, concurrency limits, and clear error
    states. Do not log document contents or secrets.

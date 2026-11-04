@@ -109,6 +109,8 @@ _PROFILE_LIST = [
             "LastName",
             "DateOfBirth",
             "DateOfExpiration",
+            "CardNumber",
+            "Address",
             "Sex",
         ),
     ),

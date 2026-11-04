@@ -11,7 +11,7 @@ Foundry post-processing without adding model-specific workflow logic.
 | General layout | `prebuilt-layout` | OCR plus tables and selection marks |
 | Invoices | `prebuilt-invoice` | Vendor, invoice ID, dates, totals, tax, line items |
 | Receipts | `prebuilt-receipt` | Merchant, date, totals, tax, purchased items |
-| Identity documents | `prebuilt-idDocument` | Name, date of birth, expiry |
+| Identity documents | `prebuilt-idDocument` | Name, date of birth, expiry, card number, address |
 | Custom document type | `<published-model-id>` | Fields defined by your custom model |
 
 ## Run a different model
@@ -29,6 +29,12 @@ Or set the default model in `.env`:
 ```env
 DOCUMENT_INTELLIGENCE_MODEL_ID=prebuilt-invoice
 ```
+
+For an API request, pass the model in the JSON body or as `?modelId=`. Use
+`modelId=auto` to classify from OCR text cues before selecting one of the
+supported profiles. Auto mode currently recognizes invoice, receipt, identity,
+and 10-Q cues; unclear documents fall back to `prebuilt-layout`. This is a
+keyword-based router, not a trained classifier.
 
 The generated file remains source-specific:
 
@@ -64,6 +70,11 @@ The API profiles select allowlisted fields from structured models and use
 profile-specific OCR fallback parsing when model fields are absent. The CLI
 `ResultWriter` continues to write its separate page-oriented OCR schema.
 
+The API cache key uses file contents and profile settings rather than the
+filename. A same-content, same-profile retry reuses its manifest. A different
+model profile produces a separate extraction result. The standalone OCR CLI
+does not use this API cache or auto routing.
+
 ## Recommended invoice model
 
 For invoices, use:
@@ -89,7 +100,9 @@ Items
 
 Field availability depends on the document and model response. Always check
 for missing fields and inspect confidence values before using them in a
-business process.
+business process. Azure's prebuilt ID model only returns its `Address` model
+field for supported driver license types; for other IDs, the project tries an
+OCR-label fallback if an address label is present.
 
 ## Adding a custom model
 

@@ -1,5 +1,5 @@
 from src.processing.extractors import extract_result, fields_to_text
-from src.processing.profiles import Profile
+from src.processing.profiles import Profile, get_profile
 
 
 def test_fields_to_text_applies_allowlist() -> None:
@@ -71,6 +71,61 @@ def test_extract_result_returns_allowlisted_fields() -> None:
             "InvoiceId": {"value": "INV-1", "content": "INV-1", "confidence": 0.95}
         }
     }
+
+
+def test_id_document_number_is_exposed_as_card_number() -> None:
+    analysis = {"documents": [{"fields": {
+        "DocumentNumber": {
+            "valueString": "A1234567",
+            "content": "A1234567",
+            "confidence": 0.97,
+        }
+    }}]}
+    profile = Profile(
+        "prebuilt-idDocument", "{data}", kind="fields", fields=("CardNumber",)
+    )
+
+    assert extract_result(analysis, profile) == {
+        "fields": {
+            "CardNumber": {
+                "value": "A1234567",
+                "content": "A1234567",
+                "confidence": 0.97,
+            }
+        }
+    }
+    assert fields_to_text(analysis, profile) == "CardNumber: A1234567"
+
+
+def test_id_document_card_number_ocr_fallback_uses_document_number_label() -> None:
+    analysis = {
+        "documents": [{"fields": {}}],
+        "pages": [{"lines": [{"content": "Document Number: A1234567"}]}],
+    }
+    profile = Profile(
+        "prebuilt-idDocument", "{data}", kind="fields", fields=("CardNumber",)
+    )
+
+    assert extract_result(analysis, profile)["fields"]["CardNumber"]["value"] == (
+        "A1234567"
+    )
+
+
+def test_id_document_fills_missing_address_from_ocr_lines() -> None:
+    analysis = {
+        "documents": [{"fields": {
+            "FirstName": {"valueString": "Ada", "content": "Ada"}
+        }}],
+        "pages": [{"lines": [{
+            "content": "Address: 42 Example Road, Jaipur, Rajasthan 302001"
+        }]}],
+    }
+
+    fields = extract_result(analysis, get_profile("prebuilt-idDocument"))["fields"]
+
+    assert fields["Address"]["value"] == (
+        "42 Example Road, Jaipur, Rajasthan 302001"
+    )
 
 
 def test_extract_result_falls_back_to_ocr_content() -> None:

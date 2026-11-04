@@ -58,7 +58,8 @@ $KV_ID = az keyvault show `
 
 Role 1: Storage Blob Data Contributor
 
-Allows the developer to upload original files and OCR JSON into Blob Storage.
+Allows the developer to upload source documents, compact results, full OCR
+analysis JSON, and cache manifests into Blob Storage.
 
 ```
 az role assignment create `

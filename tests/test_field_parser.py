@@ -67,6 +67,23 @@ def test_parse_receipt_and_identity_profile_fields() -> None:
     assert identity["DateOfBirth"]["value"] == "1815-12-10"
 
 
+def test_parse_identity_address_from_labelled_ocr() -> None:
+    identity = ProfileFieldParser().parse(
+        [
+            "Address:",
+            "C/O Arvind Kumar",
+            "Nikat Barga, Bareilly",
+            "Uttar Pradesh 243503",
+            "QR Code",
+        ],
+        get_profile("prebuilt-idDocument"),
+    )
+
+    assert identity["Address"]["value"] == (
+        "C/O Arvind Kumar Nikat Barga, Bareilly Uttar Pradesh 243503"
+    )
+
+
 def test_10q_parser_returns_only_fields_configured_by_profile() -> None:
     profile = Profile("prebuilt-layout", "{data}", kind="fields", fields=("companyName",))
 

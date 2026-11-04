@@ -191,7 +191,7 @@ Then set `FOUNDRY_AGENT_NAME` and `FOUNDRY_AGENT_VERSION` in `.env` to match.
 
 | Identity | Scope | Role | Why |
 |---|---|---|---|
-| Signed-in developer | Storage account | Storage Blob Data Contributor | Upload original files and OCR JSON |
+| Signed-in developer | Storage account | Storage Blob Data Contributor | Upload sources, results, full OCR JSON, and manifests |
 | Signed-in developer | Key Vault | Key Vault Secrets User | Read app configuration secrets |
 | Signed-in developer | Key Vault | Key Vault Secrets Officer | Create/update the app secrets |
 | Signed-in developer | Foundry project | Foundry User | Use the project agent |

@@ -69,7 +69,8 @@ DOCUMENT_INTELLIGENCE_MODEL_ID=microsoft-10q-v1
 
 ```powershell
 .\.venv\Scripts\python.exe -m scripts.document_ocr `
-  "C:\path\to\sample-layout.pdf"
+  "C:\path\to\sample-layout.pdf" `
+  --model-id microsoft-10q-v1
 ```
 
 The CLI writes its page-oriented OCR result to:
@@ -93,7 +94,9 @@ data\results\sample-layout_ocr_result.json
       "content": "001-37845",
       "confidence": 0.95
     }
-  }
+  },
+  "fullOcrBlobName": "full-ocr/<cache-key>_full_ocr_result.json",
+  "fullOcrBlobUrl": "https://<account>.blob.core.windows.net/<container>/full-ocr/<cache-key>_full_ocr_result.json"
 }
 ```
 

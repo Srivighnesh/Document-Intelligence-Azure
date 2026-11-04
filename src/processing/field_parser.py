@@ -22,6 +22,17 @@ FIELD_LABELS = {
     "FirstName": ("first name", "given name"),
     "LastName": ("last name", "surname", "family name"),
     "DateOfBirth": ("date of birth", "birth date", "dob"),
+    "CardNumber": (
+        "card number",
+        "document number",
+        "id number",
+        "license number",
+        "driver license number",
+        "passport number",
+        "credit card number",
+        "debit card number",
+    ),
+    "Address": ("address", "residential address", "permanent address"),
     "DateOfExpiration": ("date of expiration", "expiration date", "expiry date"),
     "Sex": ("sex", "gender"),
 }
@@ -51,9 +62,40 @@ class ProfileFieldParser:
         parsed: dict[str, dict[str, object | None]] = {}
         for name in field_names:
             aliases = FIELD_LABELS.get(name, (self._humanize(name),))
-            value = self._find_labeled_value(lines, aliases)
+            value = (
+                self._find_address_value(lines)
+                if name == "Address"
+                else self._find_labeled_value(lines, aliases)
+            )
             parsed[name] = field_result(value, value)
         return parsed
+
+    def _find_address_value(self, lines: list[str]) -> str | None:
+        """Collect an address label and its following OCR lines."""
+        label = re.compile(
+            r"^(?:address|residential address|permanent address)\s*[:#-]?\s*(.*)$",
+            re.I,
+        )
+        stop = re.compile(
+            r"^(?:qr code|aadhaar|aadhar|vid\b|date of birth|dob\b|"
+            r"date of expiration|passport|document number|sex\b|gender\b|"
+            r"nationality\b|name\b)",
+            re.I,
+        )
+        for index, line in enumerate(lines):
+            match = label.match(line.strip())
+            if not match:
+                continue
+            parts = [match.group(1).strip()] if match.group(1).strip() else []
+            for next_line in lines[index + 1 :]:
+                candidate = next_line.strip()
+                if not candidate or stop.match(candidate):
+                    break
+                parts.append(candidate)
+                if len(parts) >= 5:
+                    break
+            return " ".join(parts) or None
+        return None
 
     def _find_labeled_value(
         self, lines: list[str], aliases: tuple[str, ...]

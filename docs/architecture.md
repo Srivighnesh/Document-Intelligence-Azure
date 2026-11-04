@@ -2,121 +2,123 @@
 
 ## Purpose
 
-The service accepts a Base64 JSON request, stores the decoded upload in Azure
-Blob Storage, analyzes its bytes with Azure AI Document Intelligence, and
-stores a compact extraction result. Microsoft Foundry summaries are optional
-and disabled by default.
+The API accepts one Base64 PDF or image per request, extracts document fields
+with Azure AI Document Intelligence, and stores the source and results in Azure
+Blob Storage. A Foundry summary can be added when enabled.
 
-The API currently processes requests synchronously. A model profile can be
-selected from the profiles configured in `src/processing/profiles.py`; the
-default is `prebuilt-layout`. There is no automatic document classification,
-background queue, or MCP endpoint.
+Requests run synchronously. The API supports the configured model, an explicit
+model ID, or `modelId=auto` for keyword-based routing from OCR text.
 
-## Runtime architecture
+## Request flow
 
 ```mermaid
 flowchart LR
-    U[Client] -->|Base64 JSON + optional modelId| API[FastAPI]
-    CFG[Configuration] -->|DefaultAzureCredential| KV[Azure Key Vault]
-    API -->|validate and decode| WF[DocumentWorkflow]
-    WF -->|original bytes under uploads/| BLOB[Azure Blob Storage]
-    WF -->|bytes + selected model ID| DI[Azure Document Intelligence]
-    DI -->|analysis| WF
-    WF -->|profile fields or OCR fallback| EX[Profile extractors]
-    EX -->|fields-only JSON under results/| BLOB2[Azure Blob Storage]
-    EX -->|local copy| LOCAL[data/results/]
-    WF -. optional .->|analysis + profile| FA[FoundryClient]
-    FA -->|optional summary| WF
-    WF -->|Blob metadata + modelId + optional summary| API
-    API --> U
+    CLIENT[Client] --> API[FastAPI: validate and decode]
+    API --> WF[Workflow: content/profile cache]
+    WF --> CACHE{Cached?}
+    CACHE -->|Yes| RETURN1[Return duplicate true]
+    CACHE -->|No| MODE{Model mode}
+    MODE -->|Fixed ID| DI[Document Intelligence]
+    MODE -->|auto| OCR[Layout OCR and keyword routing]
+    OCR --> DI
+    DI --> EXTRACT[Extract fields and OCR fallbacks]
+    EXTRACT --> BLOB[Save source, full OCR, compact result]
+    BLOB -->|Foundry enabled| FOUNDRY[Optional summary]
+    BLOB -->|Foundry disabled| MANIFEST[Write completed manifest]
+    FOUNDRY --> MANIFEST
+    MANIFEST --> RETURN2[Return duplicate false]
 ```
 
-Azure SDK clients use `DefaultAzureCredential`. The configuration module reads
-non-secret settings from environment variables or `.env` and loads configured
-service endpoints and credentials from Key Vault.
+## Processing steps
 
-## Request sequence
+1. `Backend/api.py` validates the filename and supported `contentType`, then
+   decodes Base64 with a 10 MB decoded-size limit.
+2. `src/services/document_workflow.py` hashes the file bytes and model/profile
+   settings, then checks for a completed manifest.
+3. On a cache miss, a fixed model is called directly. With `modelId=auto`, the
+   workflow calls `prebuilt-layout`, routes from its OCR text, then calls the
+   selected model when it is not the layout fallback.
+4. `src/processing/extractors.py` creates allowlisted fields. The profile field
+   parser can fill missing values from OCR labels; ID address parsing supports
+   labeled, multi-line address text.
+5. Unreadable documents return HTTP `422` before Blob Storage writes. Readable
+   documents save the source, complete Document Intelligence response, and
+   compact result. The compact result contains `fullOcrBlobName` and
+   `fullOcrBlobUrl` links.
+6. The workflow optionally calls Foundry, writes the cache manifest last, and
+   returns the model ID, Blob URLs, and `duplicate` status.
 
-`POST /documents/analyze` performs these steps:
+## Blob layout and duplicate handling
 
-1. Validate the filename and supported media type, then `Base64Document`
-   validates and decodes the Base64 content with a 10 MB decoded limit.
-2. Resolve the requested model profile, or use the configured default.
-3. Upload the original file under `uploads/` in the configured Blob container.
-4. Submit the document bytes to Document Intelligence using the profile's
-   model ID.
-5. Extract allowlisted fields according to the profile, using OCR fallback
-   parsing when model fields are absent.
-6. Save only the compact `fields` JSON under `results/<document>_ocr_result.json`.
-7. If enabled, send profile-selected text to the Foundry agent.
-8. Return original and result Blob metadata, the model ID, and an optional summary.
-
-The request JSON contains `filename`, `contentType`, `contentBase64`, and
-optional `modelId`. The response contains `blobName`, `blobUrl`,
-`ocrBlobName`, `ocrBlobUrl`, and `modelId`; it includes `summary` only when
-Foundry is enabled. The service returns Blob URLs but does not create SAS URLs.
-The client waits for storage, OCR, and any enabled Foundry call to finish.
-
-## Components
-
-| Path | Responsibility |
+| Prefix | Contents |
 |---|---|
-| `Backend/api.py` | FastAPI health and analysis routes, upload validation, workflow construction |
-| `src/config.py` | Environment settings and Key Vault secret loading |
-| `src/processing/base64_document.py` | Validates, decodes, and encodes Base64 content |
-| `src/services/document_workflow.py` | Coordinates upload, OCR storage, profile selection, and Foundry processing |
-| `src/services/blob_storage.py` | Uploads and downloads documents in Blob Storage |
-| `src/services/document_intelligence.py` | Calls the configured Document Intelligence model |
-| `src/services/foundry/client.py` | Invokes the configured Foundry agent |
-| `src/services/foundry/response.py` | Parses JSON responses and preserves plain text responses |
-| `src/processing/profiles.py` | Maps model IDs to prompts, extractor kinds, hints, and field allowlists |
-| `src/processing/text_select.py` | Selects and compacts OCR lines |
-| `src/processing/extractors.py` | Extracts OCR text or allowlisted model fields |
-| `src/processing/summarize.py` | Applies the profile and runs the Foundry client |
-| `src/models/result_writer.py` | Shapes and writes CLI OCR result JSON |
-| `scripts/document_ocr.py` | Runs OCR on a local file or URL from the command line |
-| `scripts/foundry_ocr.py` | Sends an existing OCR JSON result to Foundry |
-| `data/results/` | Local compact CLI and API results plus Foundry JSON files (ignored by Git) |
+| `uploads/` | Original bytes named by SHA-256 content hash |
+| `results/` | Compact field result keyed by content and profile settings |
+| `full-ocr/` | Full Document Intelligence analysis JSON |
+| `manifests/` | Completed response used to serve cache hits |
 
-## Configuration and identity
+The filename does not determine a cache hit. Same bytes with the same
+processing settings reuse the response (`duplicate: true`); changed bytes under
+the same filename get a new result (`duplicate: false`). Different explicit
+models use different result keys. Manifests are written only after processing
+completes. Concurrent identical requests are not locked and can both run.
 
-Keep non-secret values in `.env` and credentials in Key Vault. The current
-configuration includes the Key Vault URL, storage container, default model ID,
-and optional `FOUNDRY_ENABLED` setting. Foundry endpoint and agent settings are
-loaded only when enabled. Key Vault supplies the Document Intelligence
-endpoint and key, optional Foundry project endpoint, and Blob Storage account URL.
+Blob URLs are returned without SAS tokens. The full analysis and compact
+result can contain sensitive identity data; protect the container and response.
 
-Azure SDK clients authenticate through `DefaultAzureCredential`. Local
-development can use Azure CLI sign-in; deployed services should use a managed
-identity where possible. The identity needs Key Vault secret access, Blob data
-access, and permission to use the configured Foundry agent. Azure management
-plane `Contributor` alone does not grant Blob data access.
+## Security
 
-## Design principles
+- Store Azure credentials in Key Vault. Use Azure CLI login locally and a
+  managed identity when deployed.
+- Keep the Blob container private. Returned links do not include access tokens.
+- Protect uploaded files and OCR results because they may contain personal
+  information. Do not commit or log document contents.
+- Upload trusted files with the correct content type. The API limits files to
+  10 MB but does not check the file’s actual format.
 
-- Keep Azure SDK calls within their service wrappers.
-- Keep request validation and HTTP error mapping in the API layer.
-- Keep orchestration in `DocumentWorkflow` so the API and CLI can reuse
-  processing components.
-- Keep model-specific prompts, hints, extraction kinds, and field allowlists
-  in profiles rather than branching throughout the workflow.
-- Store the compact result JSON under the `results/` Blob prefix.
-- Do not log document contents or secrets.
 
-## Current limitations and extension points
+## How automatic model selection works
 
-- The API handles each upload synchronously; high-volume deployments may need
-  a job queue, workers, and a status/result endpoint.
-- Model choice is explicit or configured by default. Classification and
-  confidence-based routing are future work.
-- Blob uploads use unique names under `uploads/`; retries create a new blob.
-  Add idempotency keys if retries should reuse an earlier result.
-- Compact CLI and API results are written to `data/results/`; multi-instance
-  deployments should use durable shared storage.
-- Add a model by adding a profile in `src/processing/profiles.py`; see the
-  [model extension guide](model-extension-guide.md).
-- An MCP endpoint is not part of the current runtime. Add one only if a
-  Foundry agent needs to call this service as a tool.
+- Set `modelId` to `"auto"` in the request.
+- The system reads the document’s text using the **prebuilt-layout** model.
+- It checks the OCR text for keywords and phrases. **The filename does not decide the model.**
+- It scores matches for each model:
+  - Invoice terms → `prebuilt-invoice`
+  - Receipt terms → `prebuilt-receipt`
+  - ID terms such as Aadhaar, PAN, passport, or driver’s license → `prebuilt-idDocument`
+  - 10-Q terms → `prebuilt-layout`
+- If one model gets a clear score, the system selects it and extracts fields with that model.
+- If there are too few clues or the top scores are tied, it uses `prebuilt-layout` as the fallback.
+- For a recognized invoice, receipt, or ID, auto mode may make **two OCR calls**: one to read and classify the text, then another with the selected model.
+- If you provide a specific `modelId` instead of `"auto"`, the system skips classification and uses that model directly.
 
-See the [README](../README.md) for setup and usage instructions and the
-[Azure CLI setup guide](azure-cli-setup.md) for local authentication.
+
+## Errors and edge cases
+
+| Condition | HTTP status |
+|---|---:|
+| Missing filename, invalid Base64, empty file, unsupported model ID | `400` |
+| Unsupported `contentType` | `415` |
+| File larger than 10 MB | `413` |
+| No readable OCR text or extracted fields | `422` |
+| Azure, Blob Storage, or Foundry failure | `502` |
+
+The API checks that the declared `contentType` is supported but does not verify
+the file signature. Clients should send the correct MIME type. A wrong but
+supported model ID can return null or low-confidence fields rather than an
+error.
+
+## Components in request order
+
+| Stage | Main code |
+|---|---|
+| API and Base64 | `Backend/api.py`, `src/processing/base64_document.py` |
+| Workflow and caching | `src/services/document_workflow.py`, `src/services/blob_storage.py` |
+| Auto routing and profiles | `src/processing/document_classifier.py`, `src/processing/profiles.py` |
+| Azure analysis and result shaping | `src/services/document_intelligence.py`, `src/processing/extractors.py`, `src/processing/field_parser.py` |
+| Optional summary | `src/processing/summarize.py`, `src/services/foundry/` |
+| Standalone local CLI | `scripts/document_ocr.py`, `scripts/foundry_ocr.py` |
+
+The standalone OCR CLI writes local results and does not use API auto routing,
+the API cache, or Blob Storage. See the [README](../README.md) for commands and
+the [Azure setup guide](azure-cli-setup.md) for credentials and permissions.

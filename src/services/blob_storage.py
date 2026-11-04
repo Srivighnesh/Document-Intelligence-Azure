@@ -33,3 +33,7 @@ class BlobStorageService:
         """Download the uploaded blob as bytes for analysis."""
         blob_client = self._container.get_blob_client(blob_name)
         return blob_client.download_blob().readall()
+
+    def exists(self, blob_name: str) -> bool:
+        """Return whether a blob exists."""
+        return self._container.get_blob_client(blob_name).exists()

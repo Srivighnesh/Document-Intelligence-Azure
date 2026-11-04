@@ -3,6 +3,7 @@ import base64
 from fastapi.testclient import TestClient
 
 from Backend import api
+from src.services.document_workflow import UnreadableDocumentError
 
 
 class FakeWorkflow:
@@ -70,3 +71,33 @@ def test_analyze_accepts_model_id_as_query_parameter(monkeypatch) -> None:
 
     assert response.status_code == 200
     assert response.json()["modelId"] == "prebuilt-invoice"
+
+
+def test_analyze_accepts_auto_model_id(monkeypatch) -> None:
+    response = _client(monkeypatch).post(
+        "/documents/analyze?modelId=auto",
+        json={
+            "filename": "same-name.pdf",
+            "contentType": "application/pdf",
+            "contentBase64": "eA==",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["modelId"] == "auto"
+
+
+def test_analyze_returns_422_for_unreadable_document(monkeypatch) -> None:
+    class UnreadableWorkflow:
+        def process(self, filename, content, content_type, model_id):
+            raise UnreadableDocumentError("No readable text was found.")
+
+    monkeypatch.setattr(api, "create_workflow", lambda: UnreadableWorkflow())
+    response = TestClient(api.app).post("/documents/analyze", json={
+        "filename": "blank.pdf",
+        "contentType": "application/pdf",
+        "contentBase64": "eA==",
+    })
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "No readable text was found."

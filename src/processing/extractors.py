@@ -13,6 +13,21 @@ from src.processing.text_select import compact, get_lines, select_relevant
 
 
 LOW_CONFIDENCE_THRESHOLD = 0.6
+FIELD_NAME_ALIASES = {"DocumentNumber": "CardNumber"}
+
+
+def _allowed_fields(
+    fields: dict[str, Any], allowed: set[str]
+) -> dict[str, Any]:
+    """Return model fields under the names exposed by the profile."""
+    normalized = {
+        name: field for name, field in fields.items() if name in allowed
+    }
+    for name, field in fields.items():
+        canonical_name = FIELD_NAME_ALIASES.get(name)
+        if canonical_name in allowed and canonical_name not in normalized:
+            normalized[canonical_name] = field
+    return normalized
 
 
 def ocr_to_text(analysis: dict[str, Any], profile: Profile) -> str:
@@ -28,9 +43,11 @@ def fields_to_text(analysis: dict[str, Any], profile: Profile) -> str:
     rows: list[str] = []
     allowed = set(profile.fields)
     for document in analysis.get("documents", []):
-        for name, field in document.get("fields", {}).items():
-            if allowed and name not in allowed:
-                continue
+        model_fields = document.get("fields", {})
+        fields = (
+            _allowed_fields(model_fields, allowed) if allowed else model_fields
+        )
+        for name, field in fields.items():
             value = field.get("content")
             if value is None:
                 value = first_typed_value(field)
@@ -53,15 +70,19 @@ def extract_result(analysis: dict[str, Any], profile: Profile) -> dict[str, Any]
     fields: dict[str, dict[str, Any]] = {}
     allowed = set(profile.fields)
     for document in analysis.get("documents", []):
-        for name, field in document.get("fields", {}).items():
-            if name not in allowed:
-                continue
+        model_fields = _allowed_fields(document.get("fields", {}), allowed)
+        for name, field in model_fields.items():
             value = normalize_field_value(first_typed_value(field))
             fields[name] = field_result(
                 value, field.get("content"), field.get("confidence")
             )
     if not fields and profile.fields:
         fields = ProfileFieldParser().parse(get_lines(analysis), profile)
+    elif profile.model_id == "prebuilt-idDocument":
+        parsed = ProfileFieldParser().parse(get_lines(analysis), profile)
+        for name, fallback in parsed.items():
+            if fields.get(name, {}).get("value") is None and fallback["value"]:
+                fields[name] = fallback
     for name in profile.fields:
         fields.setdefault(name, field_result(None))
     return {"fields": fields}
